@@ -29,7 +29,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @Service
-@Transactional
 public class LtvStatService {
 
     private static final Logger log = LoggerFactory.getLogger(LtvStatService.class);
@@ -37,7 +36,7 @@ public class LtvStatService {
     public static final LocalDate MULTI_PLATFORM_START_DATE = LocalDate.of(2026, 9, 17);
 
     /**
-     * 根据平台代码安全获取投放起始日期，中文在线为 2026-07-10，番茄司南为 2026-09-17，ALL 为 2026-07-10
+     * 根据平台代码安全获取投放起始日期，中文在线为 2026-07-10，番茄司南为 2026-09-16，ALL 为 2026-07-10
      */
     public static LocalDate getLaunchStartDateForPlatform(String platformCode) {
         return PlatformEnum.getLaunchStartDateForPlatform(platformCode);
@@ -90,6 +89,7 @@ public class LtvStatService {
         this.asyncRecalculateService = asyncRecalculateService;
     }
 
+    @Transactional
     public LtvLaunchConfig saveLaunchConfig(String platformCode, Long userId, LocalDate launchDate, BigDecimal spend, String remark) {
         if (userId == null) userId = 1L;
         if (platformCode == null || "ALL".equalsIgnoreCase(platformCode.trim())) {
@@ -522,27 +522,25 @@ public class LtvStatService {
     }
 
     /**
-     * 重新计算所有用户的 LTV 统计表 (定时任务调用)
+     * 重新计算所有用户的 LTV 统计表 (定时任务调用，无外部大事务，循环内部逐用户独立小事务)
      */
-    @Transactional
     public void calculateAllLtvStatsOnly() {
         List<SysUser> users = userService.listAllUsers();
         String[] platforms = new String[]{"ALL", "rocnovel", "flicknovel"};
         if (users.isEmpty()) {
             for (String p : platforms) {
-                calculateLtvStatsForUser(p, 1L);
+                calculateLtvStatsForUserDirect(p, 1L);
             }
         } else {
             for (SysUser user : users) {
                 for (String p : platforms) {
-                    calculateLtvStatsForUser(p, user.getId());
+                    calculateLtvStatsForUserDirect(p, user.getId());
                 }
             }
         }
         log.info("LTV calculation completed for all active users across platforms.");
     }
 
-    @Transactional
     public void calculateAllLtvStats() {
         calculateAllLtvStatsOnly();
     }
@@ -793,7 +791,26 @@ public class LtvStatService {
         return getOverallPredictionResult("ALL", userId);
     }
 
-    private final Map<String, CachedLtvResponse> ltvListResponseCache = new ConcurrentHashMap<>();
+    private static final int MAX_RESPONSE_CACHE_SIZE = 100;
+    private final Map<String, CachedLtvResponse> ltvListResponseCache = Collections.synchronizedMap(
+            new LinkedHashMap<String, CachedLtvResponse>(64, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, CachedLtvResponse> eldest) {
+                    return size() > MAX_RESPONSE_CACHE_SIZE;
+                }
+            }
+    );
+
+    public void clearResponseCache() {
+        ltvListResponseCache.clear();
+    }
+
+    public void cleanExpiredResponseCache() {
+        long ttlMs = 10 * 60 * 1000L;
+        synchronized (ltvListResponseCache) {
+            ltvListResponseCache.entrySet().removeIf(entry -> entry.getValue() == null || entry.getValue().isExpired(ttlMs));
+        }
+    }
 
     public void invalidateUserCache(String platformCode, Long userId) {
         if (userId != null) {
@@ -807,22 +824,28 @@ public class LtvStatService {
 
     public void invalidateUserCache(Long userId) {
         if (userId != null) {
-            ltvListResponseCache.keySet().removeIf(k -> k.endsWith("_" + userId));
+            synchronized (ltvListResponseCache) {
+                ltvListResponseCache.keySet().removeIf(k -> k.endsWith("_" + userId));
+            }
         } else {
             ltvListResponseCache.clear();
         }
     }
 
     /**
-     * 方案一 + 方案二入口：带内存缓存与 Context 共享的极速 LTV 响应获取方法 (支持平台切片)
+     * 方案一 + 方案二入口：带内存缓存与 Context 共享的极速 LTV 响应获取方法 (支持平台切片，带最大容量约束与主动过期剔除)
      */
     public LtvListResponseDto getLtvListResponse(String platformCode, Long userId) {
         if (userId == null) userId = 1L;
         String pCode = (platformCode != null && !platformCode.trim().isEmpty()) ? platformCode.trim().toLowerCase() : "all";
         String cacheKey = pCode + "_" + userId;
         CachedLtvResponse cached = ltvListResponseCache.get(cacheKey);
-        if (cached != null && !cached.isExpired(10 * 60 * 1000L)) {
-            return cached.data;
+        if (cached != null) {
+            if (!cached.isExpired(10 * 60 * 1000L)) {
+                return cached.data;
+            } else {
+                ltvListResponseCache.remove(cacheKey);
+            }
         }
 
         LtvListResponseDto freshResponse = computeLtvListResponse(pCode, userId);

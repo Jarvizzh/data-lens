@@ -14,7 +14,7 @@ public enum PlatformEnum {
 
     ALL("ALL", "大盘汇总", true, LocalDate.of(2026, 7, 10), "CST"),
     ROCNOVEL("rocnovel", "中文在线", true, LocalDate.of(2026, 7, 10), "CST"),
-    FLICKNOVEL("flicknovel", "番茄司南", true, LocalDate.of(2026, 9, 17), "UTC");
+    FLICKNOVEL("flicknovel", "番茄司南", true, LocalDate.of(2026, 9, 16), "UTC");
 
     private final String code;
     private final String displayName;

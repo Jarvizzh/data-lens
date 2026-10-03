@@ -3,8 +3,11 @@ package com.ltv.stat.scheduler;
 import com.ltv.stat.service.DailyRechargeStatService;
 import com.ltv.stat.service.LtvStatService;
 import com.ltv.stat.service.PlatformSyncManager;
+import com.ltv.stat.service.UserService;
+import com.ltv.stat.service.flicknovel.FlicknovelApiService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -23,26 +26,34 @@ public class LtvTaskScheduler {
     private final PlatformSyncManager platformSyncManager;
     private final LtvStatService ltvStatService;
     private final DailyRechargeStatService dailyRechargeStatService;
-    private final com.ltv.stat.service.flicknovel.FlicknovelApiService flicknovelApiService;
+    private final FlicknovelApiService flicknovelApiService;
+    private final UserService userService;
 
     public LtvTaskScheduler(PlatformSyncManager platformSyncManager,
                             LtvStatService ltvStatService,
                             DailyRechargeStatService dailyRechargeStatService,
-                            com.ltv.stat.service.flicknovel.FlicknovelApiService flicknovelApiService) {
+                            FlicknovelApiService flicknovelApiService,
+                            @Lazy UserService userService) {
         this.platformSyncManager = platformSyncManager;
         this.ltvStatService = ltvStatService;
         this.dailyRechargeStatService = dailyRechargeStatService;
         this.flicknovelApiService = flicknovelApiService;
+        this.userService = userService;
     }
 
     /**
-     * 北京时间每 2 小时整点: 定时拉取番茄司南所有推广链接与充值模板 v2 入库并刷新内存字典
+     * 北京时间每 4 小时整点: 定时拉取番茄司南所有推广链接与充值模板入库，并自动导入全量推广ID给超级管理员/管理员
      */
-    @Scheduled(cron = "0 0 */2 * * ?", zone = "Asia/Shanghai")
+    @Scheduled(cron = "0 0 */4 * * ?", zone = "Asia/Shanghai")
     public void scheduledFlicknovelPromotionAndTemplateSync() {
-        log.info("Starting scheduled Flicknovel promotions & recharge templates sync...");
+        log.info("Starting scheduled Flicknovel promotions & recharge templates sync (every 4h)...");
         try {
             flicknovelApiService.syncPromotionsAndTemplates(true);
+            // 同步完番茄司南推广链接后，自动为所有超级管理员/管理员补齐全量推广ID
+            if (userService != null) {
+                int imported = userService.autoImportFlicknovelLandingPagesForAdmins();
+                log.info("Scheduled Flicknovel admin landing page auto-import completed, imported: {}", imported);
+            }
         } catch (Exception e) {
             log.error("Scheduled Flicknovel promotions & recharge templates sync failed", e);
         }
@@ -100,6 +111,15 @@ public class LtvTaskScheduler {
             log.error("Scheduled Flicknovel full relations fetch failed", e);
         }
 
+        // 每日全量同步后兜底自动补齐一次管理员落地页
+        try {
+            if (userService != null) {
+                userService.autoImportFlicknovelLandingPagesForAdmins();
+            }
+        } catch (Exception e) {
+            log.error("Scheduled full auto-import flicknovel landing pages for admins failed", e);
+        }
+
         log.info("Scheduled full order & relation fetch finished.");
     }
 
@@ -129,5 +149,17 @@ public class LtvTaskScheduler {
             log.error("Scheduled daily distribution calculation failed", e);
         }
         log.info("Scheduled daily distribution calculation finished.");
+    }
+
+    /**
+     * 北京时间每 30 分钟: 定期清理过期的内存报表缓存，释放空闲堆内存
+     */
+    @Scheduled(cron = "0 0/30 * * * ?", zone = "Asia/Shanghai")
+    public void scheduledCacheCleanup() {
+        try {
+            ltvStatService.cleanExpiredResponseCache();
+        } catch (Exception e) {
+            log.error("Scheduled cache cleanup failed", e);
+        }
     }
 }

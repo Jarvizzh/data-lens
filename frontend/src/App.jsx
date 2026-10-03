@@ -626,7 +626,7 @@ export default function App() {
   };
 
   const currentPlatformObj = platformsList?.find(p => p.code?.toLowerCase() === (selectedPlatform || 'rocnovel').toLowerCase());
-  const currentPlatformLaunchDate = currentPlatformObj?.launchStartDate || (selectedPlatform?.toLowerCase() === 'flicknovel' ? '2026-09-17' : '2026-07-10');
+  const currentPlatformLaunchDate = currentPlatformObj?.launchStartDate || (selectedPlatform?.toLowerCase() === 'flicknovel' ? '2026-09-16' : '2026-07-10');
 
   // 获取平台对应今日的标准日期格式 (YYYY-MM-DD)
   const getPlatformTodayStr = (platformCode) => {

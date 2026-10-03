@@ -15,9 +15,13 @@ import com.ltv.stat.repository.FlicknovelRechargeTemplateRepository;
 import com.ltv.stat.repository.FlicknovelRelationRepository;
 import com.ltv.stat.repository.RawOrderRepository;
 import com.ltv.stat.repository.SubscriptionConfigVersionRepository;
+import com.ltv.stat.service.LtvPredictService;
+import com.ltv.stat.service.LtvStatService;
 import com.ltv.stat.util.TimeUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -49,6 +53,8 @@ public class FlicknovelApiService {
     private final FlicknovelOrderTypeResolver orderTypeResolver;
     private final ObjectMapper objectMapper;
 
+    private static final String NOT_FOUND_TPL = "__NOT_FOUND__";
+
     /**
      * 高速内存字典: Map<PromotionId, Map<PriceCent, Integer isSubs>> (0=单充, 1=订阅)
      */
@@ -70,6 +76,14 @@ public class FlicknovelApiService {
     private final Map<String, String> promotionTemplateMap = new ConcurrentHashMap<>();
 
     private volatile long lastSyncTimeMs = 0L;
+
+    @Autowired(required = false)
+    @Lazy
+    private LtvPredictService ltvPredictService;
+
+    @Autowired(required = false)
+    @Lazy
+    private LtvStatService ltvStatService;
 
     public FlicknovelApiService(FlicknovelApiClient apiClient,
                                RawOrderRepository rawOrderRepository,
@@ -110,9 +124,14 @@ public class FlicknovelApiService {
     }
 
     /**
-     * 从本地数据库加载数据构建内存字典
+     * 从本地数据库加载数据构建内存字典 (原子重建并清理失效缓存项)
      */
-    public void loadCacheFromDb() {
+    public synchronized void loadCacheFromDb() {
+        Map<String, TemplatePriceDetail> newTemplateDetailCache = new HashMap<>();
+        Map<String, Map<Integer, Integer>> newTemplatePriceTypeCache = new HashMap<>();
+        Map<String, String> newPromotionTemplateMap = new HashMap<>();
+        Map<String, Map<Integer, Integer>> newPromotionPriceTypeCache = new HashMap<>();
+
         List<FlicknovelRechargeTemplate> templates = flicknovelRechargeTemplateRepository.findAll();
         for (FlicknovelRechargeTemplate tpl : templates) {
             if (tpl.getTemplateId() != null) {
@@ -120,8 +139,8 @@ public class FlicknovelApiService {
                     try {
                         JsonNode tplNode = objectMapper.readTree(tpl.getRawPayload());
                         TemplatePriceDetail detail = parsePriceTypeDetail(tplNode);
-                        templateDetailCache.put(tpl.getTemplateId(), detail);
-                        templatePriceTypeCache.put(tpl.getTemplateId(), detail.getPriceMap());
+                        newTemplateDetailCache.put(tpl.getTemplateId(), detail);
+                        newTemplatePriceTypeCache.put(tpl.getTemplateId(), detail.getPriceMap());
                     } catch (Exception e) {
                         log.warn("[FlicknovelSync] Error parsing rawPayload for template {}: {}", tpl.getTemplateId(), e.getMessage());
                     }
@@ -132,10 +151,10 @@ public class FlicknovelApiService {
                         for (Map.Entry<String, Integer> entry : rawMap.entrySet()) {
                             priceMap.put(Integer.parseInt(entry.getKey()), entry.getValue());
                         }
-                        templatePriceTypeCache.put(tpl.getTemplateId(), priceMap);
+                        newTemplatePriceTypeCache.put(tpl.getTemplateId(), priceMap);
                         TemplatePriceDetail fallbackDetail = new TemplatePriceDetail(priceMap, Collections.emptySet(), false,
                                 priceMap, priceMap, Collections.emptySet(), Collections.emptySet());
-                        templateDetailCache.put(tpl.getTemplateId(), fallbackDetail);
+                        newTemplateDetailCache.put(tpl.getTemplateId(), fallbackDetail);
                     } catch (Exception ignored) {}
                 }
             }
@@ -146,14 +165,26 @@ public class FlicknovelApiService {
             if (prmt.getPromotionId() != null) {
                 String tplId = prmt.getRechargeTplId();
                 if (tplId != null) {
-                    promotionTemplateMap.put(prmt.getPromotionId(), tplId);
-                    Map<Integer, Integer> priceMap = templatePriceTypeCache.get(tplId);
+                    newPromotionTemplateMap.put(prmt.getPromotionId(), tplId);
+                    Map<Integer, Integer> priceMap = newTemplatePriceTypeCache.get(tplId);
                     if (priceMap != null) {
-                        promotionPriceTypeCache.put(prmt.getPromotionId(), priceMap);
+                        newPromotionPriceTypeCache.put(prmt.getPromotionId(), priceMap);
                     }
                 }
             }
         }
+
+        templateDetailCache.clear();
+        templateDetailCache.putAll(newTemplateDetailCache);
+
+        templatePriceTypeCache.clear();
+        templatePriceTypeCache.putAll(newTemplatePriceTypeCache);
+
+        promotionTemplateMap.clear();
+        promotionTemplateMap.putAll(newPromotionTemplateMap);
+
+        promotionPriceTypeCache.clear();
+        promotionPriceTypeCache.putAll(newPromotionPriceTypeCache);
     }
 
     /**
@@ -223,7 +254,6 @@ public class FlicknovelApiService {
      * @param config 平台配置
      * @return 同步保存/更新的订单数量
      */
-    @Transactional
     public int syncOrders(LocalDate startDate, LocalDate endDate, PlatformConfig config) {
         if (startDate == null) {
             startDate = PlatformEnum.FLICKNOVEL.getLaunchStartDate();
@@ -375,7 +405,7 @@ public class FlicknovelApiService {
         Map<String, List<FlicknovelOrderDto>> ordersByMember = validOrders.stream()
                 .collect(Collectors.groupingBy(this::extractMemberId));
 
-        int savedCount = 0;
+        List<RawOrder> toSave = new ArrayList<>();
 
         for (Map.Entry<String, List<FlicknovelOrderDto>> entry : ordersByMember.entrySet()) {
             String memberId = entry.getKey();
@@ -387,23 +417,31 @@ public class FlicknovelApiService {
             UserProfileSnapshot profile = userHistoryMap.computeIfAbsent(memberId, k -> new UserProfileSnapshot(null, null, null, false, null));
 
             for (FlicknovelOrderDto dto : memberOrders) {
-                boolean saved = cleanSingleOrder(dto, memberId, profile, relationTimeMap);
-                if (saved) {
-                    savedCount++;
+                RawOrder order = cleanSingleOrder(dto, memberId, profile, relationTimeMap);
+                if (order != null) {
+                    toSave.add(order);
                 }
             }
         }
 
-        return savedCount;
+        if (!toSave.isEmpty()) {
+            rawOrderRepository.saveAll(toSave);
+            rawOrderRepository.flush();
+        }
+
+        return toSave.size();
     }
 
     /**
      * 单笔订单核心清洗转换与落库
      */
-    private boolean cleanSingleOrder(FlicknovelOrderDto dto,
-                                    String memberId,
-                                    UserProfileSnapshot profile,
-                                    Map<String, LocalDateTime> relationTimeMap) {
+    private RawOrder cleanSingleOrder(FlicknovelOrderDto dto,
+                                     String memberId,
+                                     UserProfileSnapshot profile,
+                                     Map<String, LocalDateTime> relationTimeMap) {
+        if (dto == null || dto.getOrderId() == null || dto.getOrderId().trim().isEmpty()) {
+            return null;
+        }
         String orderId = dto.getOrderId().trim();
 
         // 1. 落地页 / 渠道清洗
@@ -523,8 +561,7 @@ public class FlicknovelApiService {
             order.setRawPayload(objectMapper.writeValueAsString(dto));
         } catch (Exception ignored) {}
 
-        rawOrderRepository.save(order);
-        return true;
+        return order;
     }
 
     /**
@@ -564,7 +601,6 @@ public class FlicknovelApiService {
      * @param endDate 结束日期 (默认今天)
      * @return 同步保存/更新的染色记录数
      */
-    @Transactional
     public int syncRelations(LocalDate startDate, LocalDate endDate) {
         if (startDate == null) {
             startDate = LocalDate.now(TimeUtils.BEIJING_ZONE).minusDays(2);
@@ -875,6 +911,14 @@ public class FlicknovelApiService {
         ctx.setOrderAmountCent(orderAmountCent);
         ctx.setRenewType(renewType);
         ctx.setPayTimeBj(payTimeBj);
+        if (payTimeBj != null) {
+            ctx.setPayTimeUtc(TimeUtils.convertBjToUtc(payTimeBj));
+        } else if (dto != null) {
+            long payTs = parseEpochSecondSafe(dto.getCompletedAt(), dto.getCreatedAt());
+            if (payTs > 0) {
+                ctx.setPayTimeUtc(Instant.ofEpochSecond(payTs).atZone(TimeUtils.UTC_ZONE).toLocalDateTime());
+            }
+        }
         ctx.setHasSubscribed(profile != null && profile.hasSubscribed);
         ctx.setLatestSubsPayTime(profile != null ? profile.latestSubsPayTime : null);
 
@@ -901,6 +945,11 @@ public class FlicknovelApiService {
         String pId = promotionId.trim();
         String tplId = promotionTemplateMap.get(pId);
 
+        if (NOT_FOUND_TPL.equals(tplId)) {
+            // 已确认不存在的推广ID（负缓存），直接返回，避免反复击穿
+            return;
+        }
+
         if (tplId == null) {
             // 查 DB
             FlicknovelPromotion dbPrmt = flicknovelPromotionRepository.findByPromotionId(pId).orElse(null);
@@ -912,10 +961,15 @@ public class FlicknovelApiService {
                 log.info("[FlicknovelSync] PromotionId {} not found in memory or DB. Triggering on-demand sync...", pId);
                 syncPromotionsAndTemplates(false);
                 tplId = promotionTemplateMap.get(pId);
+                if (tplId == null) {
+                    // 同步后依然未找到，记录负缓存，避免后续相同无效订单重复击穿触发全量拉取
+                    promotionTemplateMap.put(pId, NOT_FOUND_TPL);
+                    return;
+                }
             }
         }
 
-        if (tplId != null) {
+        if (tplId != null && !NOT_FOUND_TPL.equals(tplId)) {
             TemplatePriceDetail detail = templateDetailCache.get(tplId);
             if (detail == null) {
                 FlicknovelRechargeTemplate dbTpl = flicknovelRechargeTemplateRepository.findByTemplateId(tplId).orElse(null);
@@ -976,6 +1030,13 @@ public class FlicknovelApiService {
 
             // 3. 重新从本地库刷新组装内存缓存字典
             loadCacheFromDb();
+
+            if (ltvPredictService != null) {
+                ltvPredictService.clearVersionCache();
+            }
+            if (ltvStatService != null) {
+                ltvStatService.clearResponseCache();
+            }
 
             lastSyncTimeMs = System.currentTimeMillis();
             log.info("[FlicknovelSync] Successfully synced promotions and recharge templates. Cache size: {} promotions, {} templates",

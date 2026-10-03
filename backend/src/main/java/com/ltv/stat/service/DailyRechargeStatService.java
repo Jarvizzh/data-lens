@@ -31,7 +31,6 @@ import static com.ltv.stat.service.LtvStatService.getLaunchStartDateForPlatform;
  * 专职负责按“实际支付日期 (Pay Date)”维度的每日充值分布、新老客充值分布及全盘平台汇总计算。
  */
 @Service
-@Transactional
 public class DailyRechargeStatService {
 
     private static final Logger log = LoggerFactory.getLogger(DailyRechargeStatService.class);
@@ -349,18 +348,17 @@ public class DailyRechargeStatService {
         calculateDailyDistributionStatsForUser("ALL", userId);
     }
 
-    @Transactional
     public void calculateAllDailyDistributionStats() {
         List<SysUser> users = userService.listAllUsers();
         String[] platforms = new String[]{"ALL", "rocnovel", "flicknovel"};
         if (users.isEmpty()) {
             for (String p : platforms) {
-                calculateDailyDistributionStatsForUser(p, 1L);
+                calculateDailyDistributionStatsForUserDirect(p, 1L);
             }
         } else {
             for (SysUser user : users) {
                 for (String p : platforms) {
-                    calculateDailyDistributionStatsForUser(p, user.getId());
+                    calculateDailyDistributionStatsForUserDirect(p, user.getId());
                 }
             }
         }

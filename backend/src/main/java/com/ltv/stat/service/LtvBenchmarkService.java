@@ -25,7 +25,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @Service
-@Transactional
 public class LtvBenchmarkService {
 
     private static final Logger log = LoggerFactory.getLogger(LtvBenchmarkService.class);
@@ -73,7 +72,8 @@ public class LtvBenchmarkService {
         Set<String> pidSet = userPIds.stream().filter(p -> p != null && !p.trim().isEmpty()).map(String::trim).collect(Collectors.toSet());
         if (pidSet.isEmpty()) return;
 
-        List<RawOrder> userOrders = rawOrderRepository.findByLandingPageIdIn(new ArrayList<>(pidSet));
+        LocalDate cutoffDate = LocalDate.now().minusDays(65);
+        List<RawOrder> userOrders = rawOrderRepository.findByLandingPageIdInAndRegisterDateEtGreaterThanEqual(new ArrayList<>(pidSet), cutoffDate);
 
         if (userOrders.isEmpty()) {
             return;
@@ -116,27 +116,34 @@ public class LtvBenchmarkService {
 
     /**
      * 定时任务：每日夜间（或手动触发）更新 LTV 预测基准数据表
+     * 仅按近65天成熟期订单及关联用户过滤，避免全量历史订单进内存，各分组独立事务
      */
     @Scheduled(cron = "0 0 3 * * ?")
-    @Transactional
     public void recalculateAllBenchmarks() {
-        log.info("Starting LTV prediction benchmark calculation...");
-        List<RawOrder> allOrders = rawOrderRepository.findAll();
-        if (allOrders.isEmpty()) {
-            log.info("No raw orders found, populating seed default benchmarks...");
+        log.info("Starting LTV prediction benchmark calculation (recent cohorts)...");
+        LocalDate cutoffDate = LocalDate.now().minusDays(65);
+        List<RawOrder> recentOrders = rawOrderRepository.findByRegisterDateEtGreaterThanEqual(cutoffDate);
+        if (recentOrders.isEmpty()) {
+            log.info("No recent raw orders found, populating seed default benchmarks...");
             populateSeedBenchmarks("ALL", "DEFAULT", 1);
             populateSeedBenchmarks("ALL", "DEFAULT", 7);
             return;
         }
 
-        // 预查全量用户的订阅周期映射 (member_id -> sub_period_days)
-        Map<String, Integer> userPeriodMap = userSubscriptionPeriodRepository.findAll().stream()
-                .filter(p -> p.getMemberId() != null && p.getSubPeriodDays() != null)
-                .collect(Collectors.toMap(UserSubscriptionPeriod::getMemberId,
-                        UserSubscriptionPeriod::getSubPeriodDays, (a, b) -> a));
+        // 仅查询最近活跃用户群体的订阅周期映射 (member_id -> sub_period_days)，避免全量表装载
+        Set<String> memberIds = recentOrders.stream()
+                .map(RawOrder::getMemberId)
+                .filter(id -> id != null && !id.trim().isEmpty())
+                .collect(Collectors.toSet());
+
+        Map<String, Integer> userPeriodMap = memberIds.isEmpty() ? Collections.emptyMap() :
+                userSubscriptionPeriodRepository.findByMemberIdIn(memberIds).stream()
+                        .filter(p -> p.getMemberId() != null && p.getSubPeriodDays() != null)
+                        .collect(Collectors.toMap(UserSubscriptionPeriod::getMemberId,
+                                UserSubscriptionPeriod::getSubPeriodDays, (a, b) -> a));
 
         // 按 memberId 对应的 subPeriodDays 分组处理 (1: 日订, 7: 周订 等)
-        Map<Integer, List<RawOrder>> ordersByPeriod = allOrders.stream()
+        Map<Integer, List<RawOrder>> ordersByPeriod = recentOrders.stream()
                 .collect(Collectors.groupingBy(o -> userPeriodMap.getOrDefault(o.getMemberId(), 1)));
 
         for (Map.Entry<Integer, List<RawOrder>> entry : ordersByPeriod.entrySet()) {
@@ -150,7 +157,7 @@ public class LtvBenchmarkService {
             populateSeedBenchmarks("ALL", "DEFAULT", 7);
         }
 
-        // 遍历每个活跃系统用户，生成专属的 USER 维度基准曲线
+        // 遍历每个活跃系统用户，生成专属的 USER 维度基准曲线 (已在 recalculateBenchmarksForUser 内部做独立小事务)
         if (userService != null) {
             List<SysUser> users = userService.listAllUsers();
             for (SysUser user : users) {
@@ -384,7 +391,8 @@ public class LtvBenchmarkService {
         }
     }
 
-    private void populateSeedBenchmarks(String dimensionType, String dimensionValue, Integer subPeriodDays) {
+    @Transactional
+    public void populateSeedBenchmarks(String dimensionType, String dimensionValue, Integer subPeriodDays) {
         benchmarkRepository.deleteByDimensionTypeAndDimensionValueAndSubPeriodDays(dimensionType, dimensionValue, subPeriodDays);
         benchmarkRepository.flush();
         List<LtvPredictBenchmark> list = new ArrayList<>();

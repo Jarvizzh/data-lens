@@ -37,7 +37,7 @@ export default function SyncModal({
   const getPlatformLaunchStartDate = (code) => {
     const platObj = platforms?.find(p => p.code?.toLowerCase() === (code || 'ALL').toLowerCase());
     if (platObj?.launchStartDate) return platObj.launchStartDate;
-    if ((code || '').toLowerCase() === 'flicknovel') return '2026-09-17';
+    if ((code || '').toLowerCase() === 'flicknovel') return '2026-09-16';
     return '2026-07-10';
   };
 

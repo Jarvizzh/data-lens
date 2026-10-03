@@ -554,11 +554,11 @@ public class UserService {
                 if (flicknovelPromotionRepository.count() == 0 && flicknovelApiService != null) {
                     flicknovelApiService.syncPromotionsAndTemplates(true);
                 }
-                List<FlicknovelPromotion> promoList = flicknovelPromotionRepository.findAll();
-                if (promoList != null) {
-                    for (FlicknovelPromotion promo : promoList) {
-                        if (promo.getPromotionId() != null && !promo.getPromotionId().trim().isEmpty() && !"__EMPTY__".equalsIgnoreCase(promo.getPromotionId().trim())) {
-                            pids.add(promo.getPromotionId().trim());
+                List<String> promoIds = flicknovelPromotionRepository.findAllPromotionIds();
+                if (promoIds != null) {
+                    for (String promoId : promoIds) {
+                        if (promoId != null && !promoId.trim().isEmpty() && !"__EMPTY__".equalsIgnoreCase(promoId.trim())) {
+                            pids.add(promoId.trim());
                         }
                     }
                 }
@@ -788,6 +788,89 @@ public class UserService {
     @Transactional
     public void updateUserLandingPageIds(Long userId, List<String> pageIds) {
         updateUserLandingPageIds("rocnovel", userId, pageIds);
+    }
+
+    /**
+     * 定时自动为所有超级管理员与管理员补齐全量番茄司南推广ID
+     * 规则：
+     * 1. 仅针对 SUPER_ADMIN 和 ADMIN（状态有效，非主账号/聚合账号）；
+     * 2. 增量导入当前管理员尚未配置的推广ID，时区默认设为 UTC；
+     * 3. 管理员已有配置项的时区保留不变，不覆盖用户的个性化配置；
+     * 4. 若之前存在 __EMPTY__ 清空占位符，予以清理。
+     *
+     * @return 总共为管理员新增导入的落地页配置项数量
+     */
+    @Transactional
+    public int autoImportFlicknovelLandingPagesForAdmins() {
+        List<String> allPids = getAllPlatformLandingPageIds("flicknovel");
+        if (allPids == null || allPids.isEmpty()) {
+            log.info("[UserService] No flicknovel landing pages found in system, skipping auto-import.");
+            return 0;
+        }
+
+        List<SysUser> admins = sysUserRepository.findAll().stream()
+                .filter(u -> u.getStatus() != null && u.getStatus() == 1)
+                .filter(u -> !u.isMasterAccount())
+                .filter(u -> "SUPER_ADMIN".equalsIgnoreCase(u.getRole()) || "ADMIN".equalsIgnoreCase(u.getRole()))
+                .collect(Collectors.toList());
+
+        if (admins.isEmpty()) {
+            return 0;
+        }
+
+        int totalImported = 0;
+        for (SysUser admin : admins) {
+            Long userId = admin.getId();
+            List<UserLandingPage> existingList = userLandingPageRepository.findByPlatformCodeAndUserId("flicknovel", userId);
+            if (existingList == null) {
+                existingList = new ArrayList<>();
+            }
+
+            // 清理 __EMPTY__ 占位记录
+            List<UserLandingPage> emptyMarkers = existingList.stream()
+                    .filter(ulp -> ulp.getLandingPageId() != null && "__EMPTY__".equalsIgnoreCase(ulp.getLandingPageId().trim()))
+                    .collect(Collectors.toList());
+            if (!emptyMarkers.isEmpty()) {
+                userLandingPageRepository.deleteAll(emptyMarkers);
+                userLandingPageRepository.flush();
+            }
+
+            Set<String> existingPids = existingList.stream()
+                    .map(UserLandingPage::getLandingPageId)
+                    .filter(pid -> pid != null && !pid.trim().isEmpty() && !"__EMPTY__".equalsIgnoreCase(pid.trim()))
+                    .map(String::trim)
+                    .collect(Collectors.toSet());
+
+            List<UserLandingPage> toAdd = new ArrayList<>();
+            for (String pid : allPids) {
+                if (pid != null && !pid.trim().isEmpty() && !"__EMPTY__".equalsIgnoreCase(pid.trim())) {
+                    String cleanPid = pid.trim();
+                    if (!existingPids.contains(cleanPid)) {
+                        UserLandingPage ulp = new UserLandingPage();
+                        ulp.setPlatformCode("flicknovel");
+                        ulp.setUserId(userId);
+                        ulp.setLandingPageId(cleanPid);
+                        ulp.setTimezone("UTC");
+                        toAdd.add(ulp);
+                        existingPids.add(cleanPid);
+                    }
+                }
+            }
+
+            if (!toAdd.isEmpty()) {
+                userLandingPageRepository.saveAll(toAdd);
+                userLandingPageRepository.flush();
+                totalImported += toAdd.size();
+                log.info("[UserService] Auto-imported {} new flicknovel promotion IDs for admin user: {} (id: {})",
+                        toAdd.size(), admin.getUsername(), userId);
+            }
+        }
+
+        if (totalImported > 0) {
+            log.info("[UserService] Completed flicknovel auto-import: added {} total landing page configs across {} admin(s).",
+                    totalImported, admins.size());
+        }
+        return totalImported;
     }
 
     public static String hashPassword(String rawPassword) {

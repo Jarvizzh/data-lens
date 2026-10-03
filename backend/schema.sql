@@ -387,5 +387,5 @@ ON DUPLICATE KEY UPDATE `status` = VALUES(`status`);
 INSERT INTO `platform_config` (`platform_code`, `platform_name`, `auth_type`, `launch_start_date`, `status`, `auth_credentials`)
 VALUES
 ('rocnovel', '中文在线', 'TOKEN_COOKIE', '2026-07-10', 1, NULL),
-('flicknovel', '番茄司南', 'ED25519_KEY', '2026-09-17', 1, '{\"companyId\":\"355549587538358272\",\"privateKey\":\"ymcPnTqpiQOAtROHJoeegoovJxS7wv6t0HLDUv5q3/G4qry6yKcvjYwhrBqwuEIMjfXMIIqDe0YUPu9JaPofMQ==\"}')
+('flicknovel', '番茄司南', 'ED25519_KEY', '2026-09-16', 1, '{\"companyId\":\"355549587538358272\",\"privateKey\":\"ymcPnTqpiQOAtROHJoeegoovJxS7wv6t0HLDUv5q3/G4qry6yKcvjYwhrBqwuEIMjfXMIIqDe0YUPu9JaPofMQ==\"}')
 ON DUPLICATE KEY UPDATE `platform_name` = VALUES(`platform_name`), `auth_type` = VALUES(`auth_type`), `launch_start_date` = VALUES(`launch_start_date`);

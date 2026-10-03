@@ -12,6 +12,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -35,6 +37,10 @@ public class RocnovelSubscribeConfigSyncService {
     private final RestTemplate restTemplate;
     private final SubscriptionConfigVersionRepository versionRepository;
     private final SystemConfigRepository systemConfigRepository;
+
+    @Autowired(required = false)
+    @Lazy
+    private LtvPredictService ltvPredictService;
 
     @Value("${order.api.authorization}")
     private String defaultAuthorization;
@@ -132,6 +138,9 @@ public class RocnovelSubscribeConfigSyncService {
 
         log.info("Completed subscribe config sync. Saved/updated {} version records across {} configs",
                 totalSavedVersions, processedConfigIds.size());
+        if (ltvPredictService != null) {
+            ltvPredictService.clearVersionCache();
+        }
         return totalSavedVersions;
     }
 

@@ -31,7 +31,15 @@ public class LtvPredictService {
     private final SubscriptionConfigVersionRepository versionRepository;
     private final LtvPredictFacade ltvPredictFacade;
     private final CohortCurveExtrapolator extrapolator;
-    private final Map<String, List<SubscriptionConfigVersion>> matchingVersionCache = new ConcurrentHashMap<>();
+    private static final int MAX_VERSION_CACHE_SIZE = 500;
+    private final Map<String, List<SubscriptionConfigVersion>> matchingVersionCache = Collections.synchronizedMap(
+            new LinkedHashMap<String, List<SubscriptionConfigVersion>>(128, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, List<SubscriptionConfigVersion>> eldest) {
+                    return size() > MAX_VERSION_CACHE_SIZE;
+                }
+            }
+    );
 
     @Autowired
     public LtvPredictService(LtvBenchmarkService benchmarkService,

@@ -136,4 +136,59 @@ public class UserServiceLandingPageTest {
         assertEquals("ROC_PAGE_1", rocConfigs.get(0).getLandingPageId());
         assertEquals("CST", rocConfigs.get(0).getTimezone(), "传入 BJ 应平滑升级为 CST");
     }
+
+    @Test
+    public void testAutoImportFlicknovelLandingPagesForAdmins() {
+        // 1. 管理员初始配置仅保留 TEST_PROMO_999，并自定义时区为 ET
+        LandingPageConfigItem existingItem = new LandingPageConfigItem("flicknovel", "TEST_PROMO_999", "ET");
+        userService.updateUserLandingPageConfigs("flicknovel", testAdminId, Collections.singletonList(existingItem));
+
+        // 2. 模拟系统产生新的番茄司南推广ID（插入一条带有 NEW_PROMO_888 的订单）
+        RawOrder newOrder = new RawOrder();
+        newOrder.setPlatformCode("flicknovel");
+        newOrder.setOrderId("test_order_new_" + System.currentTimeMillis());
+        newOrder.setLandingPageId("NEW_PROMO_888");
+        newOrder.setMemberId("mem_888");
+        newOrder.setOrderAmountCent(888);
+        newOrder.setOrderAmountUsd(new BigDecimal("8.88"));
+        newOrder.setRegisterTimeBj(LocalDateTime.now());
+        newOrder.setRegisterTimeEt(LocalDateTime.now().minusHours(12));
+        newOrder.setRegisterDateEt(java.time.LocalDate.now());
+        newOrder.setPayTimeBj(LocalDateTime.now());
+        newOrder.setPayTimeEt(LocalDateTime.now().minusHours(12));
+        newOrder.setPayDateEt(java.time.LocalDate.now());
+        newOrder = rawOrderRepository.save(newOrder);
+
+        try {
+            // 3. 执行定时自动导入方法
+            int importedCount = userService.autoImportFlicknovelLandingPagesForAdmins();
+            assertTrue(importedCount >= 1, "应至少为管理员成功导入 1 个新推广ID");
+
+            // 4. 验证管理员配置：应包含原有的 TEST_PROMO_999（保留 ET 时区）和新追加的 NEW_PROMO_888（默认 UTC 时区）
+            List<LandingPageConfigItem> adminConfigs = userService.getUserLandingPageConfigs("flicknovel", testAdminId);
+            assertNotNull(adminConfigs);
+
+            LandingPageConfigItem promo999 = adminConfigs.stream()
+                    .filter(c -> "TEST_PROMO_999".equals(c.getLandingPageId()))
+                    .findFirst().orElse(null);
+            assertNotNull(promo999, "应保留管理员原有配置 TEST_PROMO_999");
+            assertEquals("ET", promo999.getTimezone(), "原有自定义时区 ET 不应被覆盖");
+
+            LandingPageConfigItem promo888 = adminConfigs.stream()
+                    .filter(c -> "NEW_PROMO_888".equals(c.getLandingPageId()))
+                    .findFirst().orElse(null);
+            assertNotNull(promo888, "应自动补齐新增的推广ID NEW_PROMO_888");
+            assertEquals("UTC", promo888.getTimezone(), "自动补齐的番茄司南推广ID时区应默认为 UTC");
+
+            // 5. 验证普通用户 (USER)：绝不会被自动导入
+            List<LandingPageConfigItem> userConfigs = userService.getUserLandingPageConfigs("flicknovel", testUserId);
+            assertTrue(userConfigs.isEmpty(), "普通用户绝不应自动导入全量推广ID");
+
+            // 6. 验证幂等性：再次执行导入，由于已全部拥有，导入计数应为 0
+            int secondRunImported = userService.autoImportFlicknovelLandingPagesForAdmins();
+            assertEquals(0, secondRunImported, "已全部同步时再次执行导入数应为 0");
+        } finally {
+            rawOrderRepository.deleteById(newOrder.getId());
+        }
+    }
 }

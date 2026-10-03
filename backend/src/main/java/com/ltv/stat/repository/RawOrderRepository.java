@@ -20,6 +20,7 @@ public interface RawOrderRepository extends JpaRepository<RawOrder, Long> {
     List<RawOrder> findByRegisterDateEtGreaterThanEqual(LocalDate startDate);
     Optional<RawOrder> findTopByMemberIdAndIsSubsAndRenewTypeOrderByIdAsc(String memberId, Integer isSubs, Integer renewType);
     List<RawOrder> findByLandingPageIdIn(List<String> landingPageIds);
+    List<RawOrder> findByLandingPageIdInAndRegisterDateEtGreaterThanEqual(List<String> landingPageIds, LocalDate startDate);
 
     @Query("SELECT r FROM RawOrder r WHERE (r.platformCode = :platformCode OR (:platformCode = 'rocnovel' AND (r.platformCode IS NULL OR r.platformCode = '' OR r.platformCode = 'ALL'))) AND r.landingPageId IN :landingPageIds")
     List<RawOrder> findByPlatformCodeAndLandingPageIdIn(@Param("platformCode") String platformCode, @Param("landingPageIds") List<String> landingPageIds);

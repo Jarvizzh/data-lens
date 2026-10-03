@@ -359,9 +359,14 @@ export default function LandingPageConfigModal({
 
           {mode === 'list' ? (
             <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', flexWrap: 'wrap', gap: 6 }}>
                 <p style={{ fontSize: '0.82rem', color: 'var(--text-sub)', margin: 0 }}>
                   当前共 {items.length} 个推广ID配置项，支持单独修改时区或手动删除。
+                  {modalPlatform === 'flicknovel' && isAdmin && (
+                    <span style={{ marginLeft: 8, color: '#10b981', fontWeight: 500 }}>
+                      （系统每4小时定时自动导入全量推广ID）
+                    </span>
+                  )}
                 </p>
               </div>
 

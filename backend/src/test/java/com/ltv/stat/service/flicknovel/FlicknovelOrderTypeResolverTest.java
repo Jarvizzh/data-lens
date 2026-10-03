@@ -163,4 +163,38 @@ public class FlicknovelOrderTypeResolverTest {
         ctx.setTemplateHasIntroOffer(false);
         assertEquals(0, resolver.resolve(ctx), "无首购优惠但非首充池明确为代币时，首单冲突金额应准确判为代币 (0)");
     }
+
+    /**
+     * 测试第四优先级: 从 2026-09-20 (UTC) 开始，模板价格字典找不到档位时，兜底策略为订阅 (1)；
+     * 2026-09-20 (UTC) 之前未命中则兜底为单充 (0)。
+     */
+    @Test
+    public void testPriority4_FallbackSubscriptionFromSept20() {
+        FlicknovelOrderTypeResolver.OrderResolveContext ctx = new FlicknovelOrderTypeResolver.OrderResolveContext();
+        ctx.setDto(new FlicknovelOrderDto());
+        ctx.setTemplatePriceMap(Collections.emptyMap()); // 模板字典完全未配置该档位
+        ctx.setOrderAmountCent(888); // 888 美分档位完全不存在
+
+        // 场景 A: 2026-09-19 (UTC)，即 9.20 之前，未找到档位兜底为代币单充 (0)
+        ctx.setPayTimeUtc(java.time.LocalDateTime.of(2026, 9, 19, 23, 59, 59));
+        assertEquals(0, resolver.resolve(ctx), "9.20 UTC 之前未命中模板字典应兜底为代币单充 (0)");
+
+        // 场景 B: 2026-09-20 (UTC)，刚好在 9.20 当天，未找到档位应兜底为订阅 (1)
+        ctx.setPayTimeUtc(java.time.LocalDateTime.of(2026, 9, 20, 0, 0, 1));
+        assertEquals(1, resolver.resolve(ctx), "9.20 UTC 当天未命中模板字典应兜底为订阅 (1)");
+
+        // 场景 C: 2026-09-25 (UTC)，9.20 之后，未找到档位应兜底为订阅 (1)
+        ctx.setPayTimeUtc(java.time.LocalDateTime.of(2026, 9, 25, 12, 0, 0));
+        assertEquals(1, resolver.resolve(ctx), "9.25 UTC 未命中模板字典应兜底为订阅 (1)");
+
+        // 场景 D: 仅提供北京时间 (例如 2026-09-20 07:00:00 BJ 对应 2026-09-19 23:00:00 UTC，仍属 9.19 UTC)
+        ctx.setPayTimeUtc(null);
+        ctx.setPayTimeBj(java.time.LocalDateTime.of(2026, 9, 20, 7, 0, 0));
+        assertEquals(0, resolver.resolve(ctx), "北京时间 9.20 07:00 (UTC 9.19 23:00) 仍应兜底为单充 (0)");
+
+        // 场景 E: 北京时间 2026-09-20 09:00:00 BJ 对应 2026-09-20 01:00:00 UTC
+        ctx.setPayTimeUtc(null);
+        ctx.setPayTimeBj(java.time.LocalDateTime.of(2026, 9, 20, 9, 0, 0));
+        assertEquals(1, resolver.resolve(ctx), "北京时间 9.20 09:00 (UTC 9.20 01:00) 应兜底为订阅 (1)");
+    }
 }

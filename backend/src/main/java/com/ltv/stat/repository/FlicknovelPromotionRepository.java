@@ -17,4 +17,7 @@ public interface FlicknovelPromotionRepository extends JpaRepository<FlicknovelP
     List<FlicknovelPromotion> findByRechargeTplId(String rechargeTplId);
 
     boolean existsByPromotionId(String promotionId);
+
+    @org.springframework.data.jpa.repository.Query("SELECT DISTINCT p.promotionId FROM FlicknovelPromotion p WHERE p.promotionId IS NOT NULL AND p.promotionId != ''")
+    List<String> findAllPromotionIds();
 }

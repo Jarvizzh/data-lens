@@ -7,7 +7,9 @@ import com.ltv.stat.enums.PlatformEnum;
 import com.ltv.stat.repository.PlatformConfigRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -28,6 +30,14 @@ public class PlatformSyncManager {
     private final PlatformAdapterRegistry adapterRegistry;
     private final PlatformConfigRepository platformConfigRepository;
     private final Executor syncExecutor;
+
+    @Autowired(required = false)
+    @Lazy
+    private LtvPredictService ltvPredictService;
+
+    @Autowired(required = false)
+    @Lazy
+    private LtvStatService ltvStatService;
 
     public PlatformSyncManager(PlatformAdapterRegistry adapterRegistry,
                                PlatformConfigRepository platformConfigRepository,
@@ -146,6 +156,12 @@ public class PlatformSyncManager {
                         }
                     });
         }
+        if (ltvPredictService != null) {
+            ltvPredictService.clearVersionCache();
+        }
+        if (ltvStatService != null) {
+            ltvStatService.clearResponseCache();
+        }
     }
 
     public int syncOrdersAllPlatforms(String startTimeStr, String endTimeStr) {
@@ -167,8 +183,15 @@ public class PlatformSyncManager {
             return 1;
         }
         PlatformConfig config = platformConfigRepository.findByPlatformCode(platform.getCode()).orElse(null);
-        return adapterRegistry.getAdapter(platform)
+        int res = adapterRegistry.getAdapter(platform)
                 .map(adapter -> adapter.syncConfigs(config))
                 .orElse(0);
+        if (ltvPredictService != null) {
+            ltvPredictService.clearVersionCache();
+        }
+        if (ltvStatService != null) {
+            ltvStatService.clearResponseCache();
+        }
+        return res;
     }
 }

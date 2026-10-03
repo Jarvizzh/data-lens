@@ -6,7 +6,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.Set;
 
@@ -17,11 +20,17 @@ import java.util.Set;
  * 1. 一旦番茄 OpenAPI 未来在报文中透出 benefit_type 或 product_id 等显式字段，
  *    第一优先级立即无缝生效，无需下游修改任何代码。
  * 2. 在字段未透出的过渡期，依托模板价格字典与用户时序窗口（首购特惠 vs 7天周订自动续费）启发式精准消歧。
+ * 3. 从 2026-09-20 (UTC) 开始，若模板价格字典找不到对应价格档位，默认兜底策略调整为订阅。
  */
 @Component
 public class FlicknovelOrderTypeResolver {
 
     private static final Logger log = LoggerFactory.getLogger(FlicknovelOrderTypeResolver.class);
+
+    /**
+     * 兜底为订阅策略的起始日期 (UTC 时间 2026-09-20 开始)
+     */
+    public static final LocalDate FALLBACK_SUBS_START_DATE_UTC = LocalDate.of(2026, 9, 20);
 
     /**
      * 判定上下文对象
@@ -83,6 +92,10 @@ public class FlicknovelOrderTypeResolver {
 
         public boolean isTemplateHasIntroOffer() { return templateHasIntroOffer; }
         public void setTemplateHasIntroOffer(boolean templateHasIntroOffer) { this.templateHasIntroOffer = templateHasIntroOffer; }
+
+        private LocalDateTime payTimeUtc;
+        public LocalDateTime getPayTimeUtc() { return payTimeUtc; }
+        public void setPayTimeUtc(LocalDateTime payTimeUtc) { this.payTimeUtc = payTimeUtc; }
     }
 
     /**
@@ -162,8 +175,55 @@ public class FlicknovelOrderTypeResolver {
             return priceMap.get(amountCent);
         }
 
+        // =========================================================================
+        // 【第四优先级: 模板未匹配档位兜底策略】
+        // 从 2026-09-20 (UTC) 开始，若模板价格字典找不到档位，兜底策略为订阅 (1)；
+        // 2026-09-20 (UTC) 之前仍默认兜底为代币单充 (0)。
+        // =========================================================================
+        LocalDate payDateUtc = getUtcPayDate(ctx);
+        if (payDateUtc != null && !payDateUtc.isBefore(FALLBACK_SUBS_START_DATE_UTC)) {
+            log.info("[OrderTypeResolver] Price tier {} not found in template price dictionary (payDateUtc: {}) -> Fallback to Subscription (1)",
+                    amountCent, payDateUtc);
+            return 1;
+        }
+
         // 默认兜底为代币单充 (0)
         return 0;
+    }
+
+    /**
+     * 辅助提取订单的 UTC 支付日期
+     */
+    public LocalDate getUtcPayDate(OrderResolveContext ctx) {
+        if (ctx == null) return null;
+        if (ctx.getPayTimeUtc() != null) {
+            return ctx.getPayTimeUtc().toLocalDate();
+        }
+        if (ctx.getPayTimeBj() != null) {
+            // 北京时间 (UTC+8) 换算为 UTC
+            return ctx.getPayTimeBj().minusHours(8).toLocalDate();
+        }
+        if (ctx.getDto() != null) {
+            long ts = parseEpochSecondSafe(ctx.getDto().getCompletedAt(), ctx.getDto().getCreatedAt());
+            if (ts > 0) {
+                return Instant.ofEpochSecond(ts).atZone(ZoneOffset.UTC).toLocalDate();
+            }
+        }
+        return null;
+    }
+
+    private long parseEpochSecondSafe(String primaryTs, String fallbackTs) {
+        try {
+            if (primaryTs != null && !primaryTs.trim().isEmpty()) {
+                return Long.parseLong(primaryTs.trim());
+            }
+        } catch (Exception ignored) {}
+        try {
+            if (fallbackTs != null && !fallbackTs.trim().isEmpty()) {
+                return Long.parseLong(fallbackTs.trim());
+            }
+        } catch (Exception ignored) {}
+        return 0L;
     }
 
     /**
