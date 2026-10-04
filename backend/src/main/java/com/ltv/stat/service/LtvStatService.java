@@ -15,7 +15,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -68,6 +70,7 @@ public class LtvStatService {
     private final LtvPredictService ltvPredictService;
     private final LtvBenchmarkService ltvBenchmarkService;
     private final AsyncRecalculateService asyncRecalculateService;
+    private final TransactionTemplate transactionTemplate;
 
     public LtvStatService(RawOrderRepository rawOrderRepository,
                           LtvLaunchConfigRepository ltvLaunchConfigRepository,
@@ -77,7 +80,8 @@ public class LtvStatService {
                           UserService userService,
                           LtvPredictService ltvPredictService,
                           @Autowired(required = false) LtvBenchmarkService ltvBenchmarkService,
-                          @Lazy AsyncRecalculateService asyncRecalculateService) {
+                          @Lazy AsyncRecalculateService asyncRecalculateService,
+                          @Autowired(required = false) PlatformTransactionManager transactionManager) {
         this.rawOrderRepository = rawOrderRepository;
         this.ltvLaunchConfigRepository = ltvLaunchConfigRepository;
         this.ltvDailyStatRepository = ltvDailyStatRepository;
@@ -87,6 +91,7 @@ public class LtvStatService {
         this.ltvPredictService = ltvPredictService;
         this.ltvBenchmarkService = ltvBenchmarkService;
         this.asyncRecalculateService = asyncRecalculateService;
+        this.transactionTemplate = transactionManager != null ? new TransactionTemplate(transactionManager) : null;
     }
 
     @Transactional
@@ -326,8 +331,8 @@ public class LtvStatService {
      * 计算并持久化指定用户和平台的 LTV 统计表 (仅针对指定用户本身，不触发父级主账号)
      */
     @Transactional
-    public void calculateLtvStatsForUserDirect(String platformCode, Long userId) {
-        if (userId == null) userId = 1L;
+    public void calculateLtvStatsForUserDirect(String platformCode, Long targetUserId) {
+        final Long userId = targetUserId != null ? targetUserId : 1L;
         String pCode = (platformCode != null && !platformCode.trim().isEmpty()) ? platformCode.trim().toLowerCase() : "all";
         boolean isAll = "all".equalsIgnoreCase(pCode);
         String targetPlatform = isAll ? "ALL" : pCode;
@@ -490,10 +495,20 @@ public class LtvStatService {
             currDate = currDate.plusDays(1);
         }
 
-        ltvDailyStatRepository.deleteByPlatformCodeAndUserId(targetPlatform, userId);
-        ltvDailyStatRepository.flush();
-        ltvDailyStatRepository.saveAll(statList);
-        ltvDailyStatRepository.flush();
+        if (transactionTemplate != null) {
+            transactionTemplate.execute(status -> {
+                ltvDailyStatRepository.deleteByPlatformCodeAndUserId(targetPlatform, userId);
+                ltvDailyStatRepository.flush();
+                ltvDailyStatRepository.saveAll(statList);
+                ltvDailyStatRepository.flush();
+                return null;
+            });
+        } else {
+            ltvDailyStatRepository.deleteByPlatformCodeAndUserId(targetPlatform, userId);
+            ltvDailyStatRepository.flush();
+            ltvDailyStatRepository.saveAll(statList);
+            ltvDailyStatRepository.flush();
+        }
 
         invalidateUserCache(pCode, userId);
     }

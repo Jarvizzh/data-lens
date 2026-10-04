@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
@@ -15,6 +16,7 @@ public interface LtvPredictBenchmarkRepository extends JpaRepository<LtvPredictB
             String dimensionType, String dimensionValue, Integer subPeriodDays);
 
     @Modifying(clearAutomatically = true)
+    @Transactional
     @Query("DELETE FROM LtvPredictBenchmark b WHERE b.dimensionType = :dimensionType AND b.dimensionValue = :dimensionValue AND b.subPeriodDays = :subPeriodDays")
     void deleteByDimensionTypeAndDimensionValueAndSubPeriodDays(
             @Param("dimensionType") String dimensionType,

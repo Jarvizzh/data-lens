@@ -14,7 +14,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -34,22 +36,25 @@ public class LtvBenchmarkService {
     private final UserSubscriptionPeriodRepository userSubscriptionPeriodRepository;
     private final UserService userService;
     private final Map<String, List<LtvPredictBenchmark>> benchmarkCurveCache = new ConcurrentHashMap<>();
+    private final TransactionTemplate transactionTemplate;
 
     @Autowired
     public LtvBenchmarkService(RawOrderRepository rawOrderRepository,
                                LtvPredictBenchmarkRepository benchmarkRepository,
                                UserSubscriptionPeriodRepository userSubscriptionPeriodRepository,
-                               @Autowired(required = false) UserService userService) {
+                               @Autowired(required = false) UserService userService,
+                               @Autowired(required = false) PlatformTransactionManager transactionManager) {
         this.rawOrderRepository = rawOrderRepository;
         this.benchmarkRepository = benchmarkRepository;
         this.userSubscriptionPeriodRepository = userSubscriptionPeriodRepository;
         this.userService = userService;
+        this.transactionTemplate = transactionManager != null ? new TransactionTemplate(transactionManager) : null;
     }
 
     public LtvBenchmarkService(RawOrderRepository rawOrderRepository,
                                LtvPredictBenchmarkRepository benchmarkRepository,
                                UserSubscriptionPeriodRepository userSubscriptionPeriodRepository) {
-        this(rawOrderRepository, benchmarkRepository, userSubscriptionPeriodRepository, null);
+        this(rawOrderRepository, benchmarkRepository, userSubscriptionPeriodRepository, null, null);
     }
 
     public void clearBenchmarkCache() {
@@ -295,10 +300,6 @@ public class LtvBenchmarkService {
 
         int poolInitialSubs = Math.max(1, totalInitialSubs);
 
-        // 删除旧基准数据并立即 flush
-        benchmarkRepository.deleteByDimensionTypeAndDimensionValueAndSubPeriodDays(dimensionType, dimensionValue, subPeriodDays);
-        benchmarkRepository.flush();
-
         List<LtvPredictBenchmark> benchmarksToSave = new ArrayList<>();
 
         // 构造 Day 1 ~ maxMatureDay 的加权池平均基准
@@ -332,7 +333,20 @@ public class LtvBenchmarkService {
             extrapolatePowerLawTail(dimensionType, dimensionValue, subPeriodDays, maxMatureDay, 90, baseRet, baseArpu, cohortCount, benchmarksToSave);
         }
 
-        benchmarkRepository.saveAll(benchmarksToSave);
+        if (transactionTemplate != null) {
+            transactionTemplate.execute(status -> {
+                benchmarkRepository.deleteByDimensionTypeAndDimensionValueAndSubPeriodDays(dimensionType, dimensionValue, subPeriodDays);
+                benchmarkRepository.flush();
+                benchmarkRepository.saveAll(benchmarksToSave);
+                benchmarkRepository.flush();
+                return null;
+            });
+        } else {
+            benchmarkRepository.deleteByDimensionTypeAndDimensionValueAndSubPeriodDays(dimensionType, dimensionValue, subPeriodDays);
+            benchmarkRepository.flush();
+            benchmarkRepository.saveAll(benchmarksToSave);
+            benchmarkRepository.flush();
+        }
         clearBenchmarkCache();
     }
 
@@ -393,8 +407,6 @@ public class LtvBenchmarkService {
 
     @Transactional
     public void populateSeedBenchmarks(String dimensionType, String dimensionValue, Integer subPeriodDays) {
-        benchmarkRepository.deleteByDimensionTypeAndDimensionValueAndSubPeriodDays(dimensionType, dimensionValue, subPeriodDays);
-        benchmarkRepository.flush();
         List<LtvPredictBenchmark> list = new ArrayList<>();
 
         int period = subPeriodDays != null ? subPeriodDays : 1;
@@ -423,7 +435,21 @@ public class LtvBenchmarkService {
             bench.setSampleCohortCount(10);
             list.add(bench);
         }
-        benchmarkRepository.saveAll(list);
+
+        if (transactionTemplate != null) {
+            transactionTemplate.execute(status -> {
+                benchmarkRepository.deleteByDimensionTypeAndDimensionValueAndSubPeriodDays(dimensionType, dimensionValue, subPeriodDays);
+                benchmarkRepository.flush();
+                benchmarkRepository.saveAll(list);
+                benchmarkRepository.flush();
+                return null;
+            });
+        } else {
+            benchmarkRepository.deleteByDimensionTypeAndDimensionValueAndSubPeriodDays(dimensionType, dimensionValue, subPeriodDays);
+            benchmarkRepository.flush();
+            benchmarkRepository.saveAll(list);
+            benchmarkRepository.flush();
+        }
         clearBenchmarkCache();
     }
 }

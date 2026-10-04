@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -25,10 +26,12 @@ public interface LtvLaunchConfigRepository extends JpaRepository<LtvLaunchConfig
     List<LtvLaunchConfig> findByPlatformCodeAndUserId(@Param("platformCode") String platformCode, @Param("userId") Long userId);
 
     @Modifying(clearAutomatically = true)
+    @Transactional
     @Query("DELETE FROM LtvLaunchConfig c WHERE c.userId = :userId")
     void deleteByUserId(@Param("userId") Long userId);
 
     @Modifying(clearAutomatically = true)
+    @Transactional
     @Query("DELETE FROM LtvLaunchConfig c WHERE c.platformCode = :platformCode AND c.userId = :userId")
     void deleteByPlatformCodeAndUserId(@Param("platformCode") String platformCode, @Param("userId") Long userId);
 }

@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -28,10 +29,12 @@ public interface DailyRechargeDistributionRepository extends JpaRepository<Daily
     List<DailyRechargeDistribution> findByPlatformCodeAndUserIdOrderByDateDesc(String platformCode, Long userId);
 
     @Modifying(clearAutomatically = true)
+    @Transactional
     @Query("DELETE FROM DailyRechargeDistribution d WHERE d.userId = :userId")
     void deleteByUserId(@Param("userId") Long userId);
 
     @Modifying(clearAutomatically = true)
+    @Transactional
     @Query("DELETE FROM DailyRechargeDistribution d WHERE d.platformCode = :platformCode AND d.userId = :userId")
     void deleteByPlatformCodeAndUserId(@Param("platformCode") String platformCode, @Param("userId") Long userId);
 }

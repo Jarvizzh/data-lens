@@ -8,9 +8,12 @@ import com.ltv.stat.repository.DailyRechargeDistributionRepository;
 import com.ltv.stat.repository.RawOrderRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -40,17 +43,20 @@ public class DailyRechargeStatService {
     private final UserService userService;
     private final LtvStatService ltvStatService;
     private final AsyncRecalculateService asyncRecalculateService;
+    private final TransactionTemplate transactionTemplate;
 
     public DailyRechargeStatService(RawOrderRepository rawOrderRepository,
                                     DailyRechargeDistributionRepository dailyRechargeDistributionRepository,
                                     UserService userService,
                                     LtvStatService ltvStatService,
-                                    @Lazy AsyncRecalculateService asyncRecalculateService) {
+                                    @Lazy AsyncRecalculateService asyncRecalculateService,
+                                    @Autowired(required = false) PlatformTransactionManager transactionManager) {
         this.rawOrderRepository = rawOrderRepository;
         this.dailyRechargeDistributionRepository = dailyRechargeDistributionRepository;
         this.userService = userService;
         this.ltvStatService = ltvStatService;
         this.asyncRecalculateService = asyncRecalculateService;
+        this.transactionTemplate = transactionManager != null ? new TransactionTemplate(transactionManager) : null;
     }
 
     private LocalDate getOrderPayDateForPlatform(String platformCode, RawOrder o) {
@@ -76,6 +82,7 @@ public class DailyRechargeStatService {
         return TimeUtils.getTodayCst();
     }
 
+    @Transactional
     public List<DailyRechargeDistribution> getDailyDistributionStats(String platformCode, Long userId) {
         if (userId == null) userId = 1L;
         String pCode = (platformCode != null && !platformCode.trim().isEmpty() && !"ALL".equalsIgnoreCase(platformCode.trim()))
@@ -96,10 +103,12 @@ public class DailyRechargeStatService {
         return list;
     }
 
+    @Transactional
     public List<DailyRechargeDistribution> getDailyDistributionStats(Long userId) {
         return getDailyDistributionStats("ALL", userId);
     }
 
+    @Transactional
     public List<DailyRechargeDistribution> getDailyDistributionStats() {
         return getDailyDistributionStats("ALL", 1L);
     }
@@ -293,8 +302,8 @@ public class DailyRechargeStatService {
      * 计算并持久化指定用户和平台的每日充值分布表 (仅针对指定用户本身，不触发父级主账号)
      */
     @Transactional
-    public void calculateDailyDistributionStatsForUserDirect(String platformCode, Long userId) {
-        if (userId == null) userId = 1L;
+    public void calculateDailyDistributionStatsForUserDirect(String platformCode, Long targetUserId) {
+        final Long userId = targetUserId != null ? targetUserId : 1L;
         String pCode = (platformCode != null && !platformCode.trim().isEmpty() && !"ALL".equalsIgnoreCase(platformCode.trim()))
                 ? platformCode.trim().toLowerCase() : "ALL";
         LocalDate today = getTodayForPlatform(pCode);
@@ -319,10 +328,20 @@ public class DailyRechargeStatService {
             currDate = currDate.plusDays(1);
         }
 
-        dailyRechargeDistributionRepository.deleteByPlatformCodeAndUserId(pCode, userId);
-        dailyRechargeDistributionRepository.flush();
-        dailyRechargeDistributionRepository.saveAll(statList);
-        dailyRechargeDistributionRepository.flush();
+        if (transactionTemplate != null) {
+            transactionTemplate.execute(status -> {
+                dailyRechargeDistributionRepository.deleteByPlatformCodeAndUserId(pCode, userId);
+                dailyRechargeDistributionRepository.flush();
+                dailyRechargeDistributionRepository.saveAll(statList);
+                dailyRechargeDistributionRepository.flush();
+                return null;
+            });
+        } else {
+            dailyRechargeDistributionRepository.deleteByPlatformCodeAndUserId(pCode, userId);
+            dailyRechargeDistributionRepository.flush();
+            dailyRechargeDistributionRepository.saveAll(statList);
+            dailyRechargeDistributionRepository.flush();
+        }
     }
 
     @Transactional
