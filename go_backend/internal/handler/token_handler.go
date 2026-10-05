@@ -6,6 +6,7 @@ import (
 	"go_backend/internal/config"
 	"go_backend/internal/middleware"
 	"go_backend/internal/pkg/response"
+	"go_backend/internal/repository"
 	"go_backend/internal/service/client/rocnovel"
 
 	"github.com/gin-gonic/gin"
@@ -13,10 +14,14 @@ import (
 
 type TokenHandler struct {
 	rocnovelClient *rocnovel.Client
+	platformRepo   *repository.PlatformRepository
 }
 
-func NewTokenHandler(rocnovelClient *rocnovel.Client) *TokenHandler {
-	return &TokenHandler{rocnovelClient: rocnovelClient}
+func NewTokenHandler(rocnovelClient *rocnovel.Client, platformRepo *repository.PlatformRepository) *TokenHandler {
+	return &TokenHandler{
+		rocnovelClient: rocnovelClient,
+		platformRepo:   platformRepo,
+	}
 }
 
 func (h *TokenHandler) GetToken(c *gin.Context) {
@@ -26,9 +31,21 @@ func (h *TokenHandler) GetToken(c *gin.Context) {
 		return
 	}
 
+	auth := config.GlobalConfig.Order.API.Authorization
+	cookie := config.GlobalConfig.Order.API.Cookie
+
+	if h.platformRepo != nil {
+		if dbAuth, err := h.platformRepo.GetSystemConfig(c.Request.Context(), "API_AUTHORIZATION"); err == nil && dbAuth != "" {
+			auth = dbAuth
+		}
+		if dbCookie, err := h.platformRepo.GetSystemConfig(c.Request.Context(), "API_COOKIE"); err == nil && dbCookie != "" {
+			cookie = dbCookie
+		}
+	}
+
 	response.Success(c, gin.H{
-		"authorization": config.GlobalConfig.Order.API.Authorization,
-		"cookie":        config.GlobalConfig.Order.API.Cookie,
+		"authorization": auth,
+		"cookie":        cookie,
 	})
 }
 
@@ -50,9 +67,15 @@ func (h *TokenHandler) UpdateToken(c *gin.Context) {
 
 	if req.Authorization != "" {
 		config.GlobalConfig.Order.API.Authorization = req.Authorization
+		if h.platformRepo != nil {
+			_ = h.platformRepo.SetSystemConfig(c.Request.Context(), "API_AUTHORIZATION", strings.TrimSpace(req.Authorization))
+		}
 	}
 	if req.Cookie != "" {
 		config.GlobalConfig.Order.API.Cookie = req.Cookie
+		if h.platformRepo != nil {
+			_ = h.platformRepo.SetSystemConfig(c.Request.Context(), "API_COOKIE", strings.TrimSpace(req.Cookie))
+		}
 	}
 
 	response.SuccessWithMsg(c, "Token 更新成功！", nil)

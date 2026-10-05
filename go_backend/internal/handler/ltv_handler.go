@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -189,19 +190,80 @@ func (h *LtvHandler) Recalculate(c *gin.Context) {
 
 // SyncOrders 同步订单 (/api/ltv/sync-orders)
 func (h *LtvHandler) SyncOrders(c *gin.Context) {
-	if h.syncMgr != nil {
-		_ = h.syncMgr.SyncOrdersAllPlatforms(c.Request.Context(), "", "")
+	var req struct {
+		StartTime    string `json:"startTime"`
+		EndTime      string `json:"endTime"`
+		PlatformCode string `json:"platformCode"`
 	}
-	response.SuccessWithMsg(c, "订单同步完成！", nil)
+	_ = c.ShouldBindJSON(&req)
+
+	platformCode := c.Query("platformCode")
+	if platformCode == "" {
+		platformCode = req.PlatformCode
+	}
+	if platformCode == "" {
+		platformCode = "ALL"
+	}
+
+	totalSynced := 0
+	if h.syncMgr != nil {
+		var err error
+		totalSynced, err = h.syncMgr.SyncOrdersForPlatform(c.Request.Context(), platformCode, req.StartTime, req.EndTime)
+		if err != nil {
+			if strings.Contains(err.Error(), "TOKEN_EXPIRED") {
+				c.JSON(http.StatusOK, gin.H{
+					"code": 4002,
+					"msg":  "订单接口 Authorization 登录 Token 已过期，请在页面更新最新 Token",
+				})
+				return
+			}
+			response.Error(c, 500, "同步订单失败: "+err.Error())
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":              0,
+		"msg":               fmt.Sprintf("订单同步完成，共抓取/更新 %d 笔订单！", totalSynced),
+		"totalSyncedOrders": totalSynced,
+	})
 }
 
 // SyncAndCalc 同步订单并重新计算 (/api/ltv/sync-and-calc)
 func (h *LtvHandler) SyncAndCalc(c *gin.Context) {
+	var req struct {
+		StartTime    string `json:"startTime"`
+		EndTime      string `json:"endTime"`
+		PlatformCode string `json:"platformCode"`
+	}
+	_ = c.ShouldBindJSON(&req)
+
+	platformCode := c.Query("platformCode")
+	if platformCode == "" {
+		platformCode = req.PlatformCode
+	}
+	if platformCode == "" {
+		platformCode = "ALL"
+	}
+
+	totalSynced := 0
 	if h.syncMgr != nil {
-		_ = h.syncMgr.SyncOrdersAllPlatforms(c.Request.Context(), "", "")
+		var err error
+		totalSynced, err = h.syncMgr.SyncOrdersForPlatform(c.Request.Context(), platformCode, req.StartTime, req.EndTime)
+		if err != nil && strings.Contains(err.Error(), "TOKEN_EXPIRED") {
+			c.JSON(http.StatusOK, gin.H{
+				"code": 4002,
+				"msg":  "订单接口 Authorization 登录 Token 已过期，请在页面更新最新 Token",
+			})
+			return
+		}
 	}
 	_ = h.ltvSvc.CalculateAllLtvStats(c.Request.Context())
-	response.SuccessWithMsg(c, "数据同步与重新计算完成", nil)
+	c.JSON(http.StatusOK, gin.H{
+		"code":              0,
+		"msg":               fmt.Sprintf("数据同步与重新计算完成，共同步 %d 笔订单", totalSynced),
+		"totalSyncedOrders": totalSynced,
+	})
 }
 
 // RecalculateDailyDistribution 仅重算每日充值分布 (/api/ltv/recalculate-daily-distribution)
