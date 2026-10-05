@@ -66,10 +66,13 @@ func main() {
 	predictSvc := service.NewPredictService(benchmarkRepo)
 	ltvCache := service.NewLtvMemoryCache(30 * time.Minute)
 	calculator := service.NewLtvCalculator(orderRepo, ltvStatRepo, userRepo, predictSvc)
-	ltvSvc := service.NewLtvService(calculator, ltvStatRepo, orderRepo, userRepo, predictSvc, ltvCache)
+	monthlySummarySvc := service.NewMonthlySummaryService()
+	ltvSvc := service.NewLtvService(calculator, ltvStatRepo, orderRepo, userRepo, predictSvc, ltvCache, monthlySummarySvc)
 	rechargeSvc := service.NewRechargeStatService(orderRepo, userRepo, rechargeDistRepo)
+	dailyDistSvc := service.NewDailyDistributionService(rechargeDistRepo, orderRepo, userRepo, rechargeSvc)
 	syncMgr := service.NewSyncManager(orderRepo, flicknovelRepo, rocnovelClient, flicknovelClient)
-	userSvc := service.NewUserService(userRepo)
+	userSvc := service.NewUserService(userRepo, orderRepo, flicknovelRepo)
+	permSvc := service.NewUserPermissionService(userRepo)
 	settleSvc := service.NewSettlementService(settleRepo, orderRepo, userRepo)
 
 	// 7. 启动定时任务调度器
@@ -82,10 +85,12 @@ func main() {
 	// 8. 装配 HTTP 控制器与路由
 	r := handler.SetupRouter(handler.RouterParams{
 		AuthHandler:       handler.NewAuthHandler(userSvc),
-		LtvHandler:        handler.NewLtvHandler(ltvSvc, rechargeDistRepo),
-		UserHandler:       handler.NewUserHandler(userSvc),
-		SettlementHandler: handler.NewSettlementHandler(settleSvc),
+		LtvHandler:        handler.NewLtvHandler(ltvSvc, dailyDistSvc, permSvc, syncMgr, predictSvc),
+		UserHandler:       handler.NewUserHandler(userSvc, permSvc, ltvSvc),
+		AdminHandler:      handler.NewAdminHandler(userSvc, permSvc, ltvSvc),
+		SettlementHandler: handler.NewSettlementHandler(settleSvc, permSvc),
 		PlatformHandler:   handler.NewPlatformHandler(platformRepo, syncMgr),
+		TokenHandler:      handler.NewTokenHandler(rocnovelClient),
 	})
 
 	srv := &http.Server{

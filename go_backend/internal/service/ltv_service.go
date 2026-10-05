@@ -15,12 +15,13 @@ import (
 )
 
 type LtvService struct {
-	calculator  *LtvCalculator
-	ltvStatRepo *repository.LtvStatRepository
-	orderRepo   *repository.OrderRepository
-	userRepo    *repository.UserRepository
-	predictSvc  *PredictService
-	cache       *LtvMemoryCache
+	calculator        *LtvCalculator
+	ltvStatRepo       *repository.LtvStatRepository
+	orderRepo         *repository.OrderRepository
+	userRepo          *repository.UserRepository
+	predictSvc        *PredictService
+	cache             *LtvMemoryCache
+	monthlySummarySvc *MonthlySummaryService
 }
 
 func NewLtvService(
@@ -30,19 +31,21 @@ func NewLtvService(
 	userRepo *repository.UserRepository,
 	predictSvc *PredictService,
 	cache *LtvMemoryCache,
+	monthlySummarySvc *MonthlySummaryService,
 ) *LtvService {
 	return &LtvService{
-		calculator:  calculator,
-		ltvStatRepo: ltvStatRepo,
-		orderRepo:   orderRepo,
-		userRepo:    userRepo,
-		predictSvc:  predictSvc,
-		cache:       cache,
+		calculator:        calculator,
+		ltvStatRepo:       ltvStatRepo,
+		orderRepo:         orderRepo,
+		userRepo:          userRepo,
+		predictSvc:        predictSvc,
+		cache:             cache,
+		monthlySummarySvc: monthlySummarySvc,
 	}
 }
 
-// GetLtvDailyStats 查询 LTV 每日统计报表与汇总
-func (s *LtvService) GetLtvDailyStats(ctx context.Context, platformCode string, targetUserID int64) (*dto.LtvListResponse, error) {
+// GetLtvListResponse 兼容 Java 强类型 /api/ltv/list
+func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string, targetUserID int64) (*dto.LtvListResponseDto, error) {
 	if targetUserID <= 0 {
 		targetUserID = 1
 	}
@@ -51,9 +54,9 @@ func (s *LtvService) GetLtvDailyStats(ctx context.Context, platformCode string, 
 		pCode = "all"
 	}
 
-	cacheKey := fmt.Sprintf("ltv:%s:%d", pCode, targetUserID)
+	cacheKey := fmt.Sprintf("ltv:list:%s:%d", pCode, targetUserID)
 	if cached, ok := s.cache.Get(cacheKey); ok {
-		if resp, valid := cached.(*dto.LtvListResponse); valid {
+		if resp, valid := cached.(*dto.LtvListResponseDto); valid {
 			return resp, nil
 		}
 	}
@@ -64,23 +67,26 @@ func (s *LtvService) GetLtvDailyStats(ctx context.Context, platformCode string, 
 		return nil, fmt.Errorf("find ltv stats failed: %w", err)
 	}
 
-	// 计算汇总指标
-	summary := &dto.LtvSummaryDto{
-		TotalSpend:    decimal.Zero,
-		TotalRecharge: decimal.Zero,
-		TotalRefund:   decimal.Zero,
-		TotalProfit:   decimal.Zero,
+	if len(stats) == 0 {
+		_ = s.CalculateLtvStatsForUserDirect(ctx, pCode, targetUserID)
+		stats, _ = s.ltvStatRepo.FindStatsByFilter(ctx, pCode, []int64{targetUserID}, startDate, "")
 	}
 
+	totalSpend := decimal.Zero
+	totalRecharge := decimal.Zero
+	totalSubUsers := 0
+	totalRetainedSubUsers := 0
 	cohortCurves := make(map[*model.LtvDailyStat][]float64)
 	today := time.Now().In(timeutil.BeijingZone)
 	minLaunchDate := today
 
 	for _, stat := range stats {
-		summary.TotalSpend = summary.TotalSpend.Add(stat.Spend)
-		summary.TotalRecharge = summary.TotalRecharge.Add(stat.TotalRecharge)
-		summary.TotalRefund = summary.TotalRefund.Add(stat.TotalRefund)
-		summary.SubUserCount += stat.SubUserCount
+		totalSpend = totalSpend.Add(stat.Spend)
+		totalRecharge = totalRecharge.Add(stat.TotalRecharge)
+		totalSubUsers += stat.SubUserCount
+		if stat.Day7SubUserCount != nil {
+			totalRetainedSubUsers += *stat.Day7SubUserCount
+		}
 
 		lDate, err := time.ParseInLocation(timeutil.DateLayout, stat.LaunchDate, timeutil.BeijingZone)
 		if err == nil {
@@ -93,34 +99,34 @@ func (s *LtvService) GetLtvDailyStats(ctx context.Context, platformCode string, 
 		}
 	}
 
-	summary.TotalProfit = summary.TotalRecharge.Sub(summary.TotalRefund).Sub(summary.TotalSpend)
-	if summary.TotalSpend.GreaterThan(decimal.Zero) {
-		summary.OverallRoi = summary.TotalRecharge.Sub(summary.TotalRefund).DivRound(summary.TotalSpend, 4)
-	}
-	if summary.SubUserCount > 0 && summary.TotalSpend.GreaterThan(decimal.Zero) {
-		summary.SubUserCost = summary.TotalSpend.DivRound(decimal.NewFromInt(int64(summary.SubUserCount)), 2)
-	}
+	overallPred := s.predictSvc.facade.AssembleOverallPrediction(totalSpend, totalRecharge, stats, cohortCurves, minLaunchDate, today)
+	monthlySummary := s.monthlySummarySvc.BuildMonthlySummary(ctx, stats)
 
-	// 大盘整体回本天数预测
-	overallPred := s.predictSvc.facade.AssembleOverallPrediction(summary.TotalSpend, summary.TotalRecharge, stats, cohortCurves, minLaunchDate, today)
-	summary.OverallPaybackDays = overallPred.PredictedPaybackDays
-
-	// 组装可见账号列表
-	visibleUsers := make([]dto.VisibleAccountDto, 0)
-	users, _ := s.userRepo.FindAll(ctx)
-	for _, u := range users {
-		visibleUsers = append(visibleUsers, dto.VisibleAccountDto{
-			UserID:   u.ID,
-			Username: u.Username,
-			Role:     u.Role,
-			IsMaster: u.IsMaster,
-		})
+	retainedRateStr := "0.00%"
+	if totalSubUsers > 0 {
+		rate := decimal.NewFromInt(int64(totalRetainedSubUsers)).
+			DivRound(decimal.NewFromInt(int64(totalSubUsers)), 4).
+			Mul(decimal.NewFromInt(100))
+		retainedRateStr = fmt.Sprintf("%.2f%%", rate.InexactFloat64())
 	}
 
-	resp := &dto.LtvListResponse{
-		Items:       stats,
-		Summary:     summary,
-		UserViewMap: visibleUsers,
+	resp := &dto.LtvListResponseDto{
+		Code:                          0,
+		Msg:                           "success",
+		Data:                          stats,
+		OverallPredictedPaybackDays:   overallPred.PredictedPaybackDays,
+		OverallPaybackCycleDays:       overallPred.PredictedPaybackDays,
+		OverallPredictedDay30Roi:      overallPred.PredictedDay30Roi,
+		OverallPredictedDay60Roi:      overallPred.PredictedDay60Roi,
+		OverallPredictedDay90Roi:      overallPred.PredictedDay90Roi,
+		OverallPredictedDay30Recharge: overallPred.PredictedDay30Recharge,
+		OverallPredictedDay60Recharge: overallPred.PredictedDay60Recharge,
+		OverallPredictedDay90Recharge: overallPred.PredictedDay90Recharge,
+		MonthlySummary:                monthlySummary,
+		OverallRetainedSubUsers:       totalRetainedSubUsers,
+		OverallRetainedRate:           retainedRateStr,
+		Total:                         len(stats),
+		UserID:                        targetUserID,
 	}
 
 	s.cache.Set(cacheKey, resp)
@@ -152,7 +158,6 @@ func (s *LtvService) CalculateLtvStatsForUserDirect(ctx context.Context, platfor
 		return fmt.Errorf("find orders failed: %w", err)
 	}
 
-	// 按落地页时区对应的日期分组订单
 	cohortMap := make(map[string][]*model.RawOrder)
 	for _, o := range orders {
 		regDate := o.RegisterDateET
@@ -199,7 +204,50 @@ func (s *LtvService) CalculateLtvStatsForUserDirect(ctx context.Context, platfor
 	return nil
 }
 
-// CalculateAllLtvStats 计算全量用户的各平台 LTV
+// SaveLaunchConfig 保存消耗配置并触发重算
+func (s *LtvService) SaveLaunchConfig(ctx context.Context, req dto.SaveLaunchConfigRequest) error {
+	cfg := &model.LtvLaunchConfig{
+		PlatformCode: strings.ToLower(req.PlatformCode),
+		UserID:       req.UserID,
+		LaunchDate:   req.LaunchDate,
+		Spend:        req.Spend,
+		Remark:       req.Remark,
+		UpdatedAt:    time.Now(),
+	}
+	if err := s.ltvStatRepo.SaveLaunchConfig(ctx, cfg); err != nil {
+		return err
+	}
+	_ = s.CalculateLtvStatsForUserDirect(ctx, req.PlatformCode, req.UserID)
+	_ = s.CalculateLtvStatsForUserDirect(ctx, "all", req.UserID)
+	return nil
+}
+
+// BatchSaveLaunchConfig 批量导入消耗配置
+func (s *LtvService) BatchSaveLaunchConfig(ctx context.Context, platformCode string, userID int64, items []dto.BatchSpendItem) (int, error) {
+	pCode := strings.ToLower(platformCode)
+	count := 0
+	for _, item := range items {
+		if item.LaunchDate == "" {
+			continue
+		}
+		cfg := &model.LtvLaunchConfig{
+			PlatformCode: pCode,
+			UserID:       userID,
+			LaunchDate:   item.LaunchDate,
+			Spend:        item.Spend,
+			Remark:       item.Remark,
+			UpdatedAt:    time.Now(),
+		}
+		if err := s.ltvStatRepo.SaveLaunchConfig(ctx, cfg); err == nil {
+			count++
+		}
+	}
+	_ = s.CalculateLtvStatsForUserDirect(ctx, pCode, userID)
+	_ = s.CalculateLtvStatsForUserDirect(ctx, "all", userID)
+	return count, nil
+}
+
+// CalculateAllLtvStats 计算所有用户的 LTV
 func (s *LtvService) CalculateAllLtvStats(ctx context.Context) error {
 	users, err := s.userRepo.FindAll(ctx)
 	if err != nil {
@@ -214,18 +262,3 @@ func (s *LtvService) CalculateAllLtvStats(ctx context.Context) error {
 	return nil
 }
 
-// SaveLaunchConfig 保存消耗配置并触发重算
-func (s *LtvService) SaveLaunchConfig(ctx context.Context, req dto.SaveLaunchConfigRequest) error {
-	cfg := &model.LtvLaunchConfig{
-		PlatformCode: strings.ToLower(req.PlatformCode),
-		UserID:       req.UserID,
-		LaunchDate:   req.LaunchDate,
-		Spend:        req.Spend,
-		Remark:       req.Remark,
-		UpdatedAt:    time.Now(),
-	}
-	if err := s.ltvStatRepo.SaveLaunchConfig(ctx, cfg); err != nil {
-		return err
-	}
-	return s.CalculateLtvStatsForUserDirect(ctx, req.PlatformCode, req.UserID)
-}

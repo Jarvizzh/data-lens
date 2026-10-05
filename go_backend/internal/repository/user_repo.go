@@ -48,6 +48,10 @@ func (r *UserRepository) Update(ctx context.Context, user *model.SysUser) error 
 	return r.db.WithContext(ctx).Save(user).Error
 }
 
+func (r *UserRepository) Delete(ctx context.Context, id int64) error {
+	return r.db.WithContext(ctx).Where("id = ?", id).Delete(&model.SysUser{}).Error
+}
+
 // SubAccount 相关
 func (r *UserRepository) FindSubAccountIDs(ctx context.Context, masterUserID int64) ([]int64, error) {
 	var subIDs []int64
@@ -57,18 +61,40 @@ func (r *UserRepository) FindSubAccountIDs(ctx context.Context, masterUserID int
 	return subIDs, err
 }
 
-func (r *UserRepository) BindSubAccount(ctx context.Context, masterUserID, subUserID int64) error {
-	sub := model.UserSubAccount{
-		MasterUserID: masterUserID,
-		SubUserID:    subUserID,
-	}
-	return r.db.WithContext(ctx).Where("master_user_id = ? AND sub_user_id = ?", masterUserID, subUserID).
-		FirstOrCreate(&sub).Error
+func (r *UserRepository) ReplaceMasterSubAccounts(ctx context.Context, masterUserID int64, subUserIDs []int64) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("master_user_id = ?", masterUserID).Delete(&model.UserSubAccount{}).Error; err != nil {
+			return err
+		}
+		if len(subUserIDs) == 0 {
+			return nil
+		}
+		subs := make([]model.UserSubAccount, 0, len(subUserIDs))
+		for _, sid := range subUserIDs {
+			subs = append(subs, model.UserSubAccount{
+				MasterUserID: masterUserID,
+				SubUserID:    sid,
+			})
+		}
+		return tx.Create(&subs).Error
+	})
 }
 
-func (r *UserRepository) UnbindSubAccount(ctx context.Context, masterUserID, subUserID int64) error {
-	return r.db.WithContext(ctx).Where("master_user_id = ? AND sub_user_id = ?", masterUserID, subUserID).
-		Delete(&model.UserSubAccount{}).Error
+func (r *UserRepository) ExistsSubAccount(ctx context.Context, masterUserID, subUserID int64) bool {
+	var count int64
+	r.db.WithContext(ctx).Model(&model.UserSubAccount{}).
+		Where("master_user_id = ? AND sub_user_id = ?", masterUserID, subUserID).
+		Count(&count)
+	return count > 0
+}
+
+func (r *UserRepository) DeleteSubAccountRelationsForUser(ctx context.Context, userID int64) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("sub_user_id = ?", userID).Delete(&model.UserSubAccount{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("master_user_id = ?", userID).Delete(&model.UserSubAccount{}).Error
+	})
 }
 
 // ViewPermission 相关
@@ -97,6 +123,14 @@ func (r *UserRepository) ReplaceViewPermissions(ctx context.Context, userID int6
 		}
 		return tx.Create(&perms).Error
 	})
+}
+
+func (r *UserRepository) ExistsViewPermission(ctx context.Context, userID, targetUserID int64) bool {
+	var count int64
+	r.db.WithContext(ctx).Model(&model.UserViewPermission{}).
+		Where("user_id = ? AND target_user_id = ?", userID, targetUserID).
+		Count(&count)
+	return count > 0
 }
 
 // UserLandingPage 相关
@@ -138,6 +172,22 @@ func (r *UserRepository) ReplaceLandingPages(ctx context.Context, platformCode s
 				LandingPageID: lpid,
 				Timezone:      "CST",
 			})
+		}
+		return tx.Create(&pages).Error
+	})
+}
+
+func (r *UserRepository) ReplaceLandingPageConfigs(ctx context.Context, platformCode string, userID int64, pages []*model.UserLandingPage) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		delQuery := tx.Where("user_id = ?", userID)
+		if platformCode != "" && platformCode != "ALL" {
+			delQuery = delQuery.Where("platform_code = ?", platformCode)
+		}
+		if err := delQuery.Delete(&model.UserLandingPage{}).Error; err != nil {
+			return err
+		}
+		if len(pages) == 0 {
+			return nil
 		}
 		return tx.Create(&pages).Error
 	})

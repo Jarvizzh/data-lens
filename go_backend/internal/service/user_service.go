@@ -6,27 +6,38 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go_backend/internal/model"
 	"go_backend/internal/repository"
+	"go_backend/internal/service/dto"
 )
 
 type UserService struct {
-	userRepo *repository.UserRepository
+	userRepo       *repository.UserRepository
+	orderRepo      *repository.OrderRepository
+	flicknovelRepo *repository.FlicknovelRepository
 }
 
-func NewUserService(userRepo *repository.UserRepository) *UserService {
-	return &UserService{userRepo: userRepo}
+func NewUserService(
+	userRepo *repository.UserRepository,
+	orderRepo *repository.OrderRepository,
+	flicknovelRepo *repository.FlicknovelRepository,
+) *UserService {
+	return &UserService{
+		userRepo:       userRepo,
+		orderRepo:      orderRepo,
+		flicknovelRepo: flicknovelRepo,
+	}
 }
 
-// HashPassword 与 Java 版本加盐 SHA-256 100% 兼容
+// HashPassword 与 Java 版本加盐 SHA-256 100% 兼容: Base64(SHA-256("zw-ltv-salt-" + rawPassword))
 func HashPassword(rawPassword string) string {
 	hash := sha256.Sum256([]byte("zw-ltv-salt-" + rawPassword))
 	return base64.StdEncoding.EncodeToString(hash[:])
 }
 
-// ValidatePassword 校验密码
 func (s *UserService) ValidatePassword(user *model.SysUser, rawPassword string) bool {
 	if user == nil || rawPassword == "" {
 		return false
@@ -64,7 +75,7 @@ type CreateUserParam struct {
 func (s *UserService) CreateUser(ctx context.Context, param CreateUserParam) (*model.SysUser, error) {
 	existing, _ := s.userRepo.FindByUsername(ctx, param.Username)
 	if existing != nil {
-		return nil, errors.New("username already exists")
+		return nil, errors.New("用户名已存在")
 	}
 
 	role := param.Role
@@ -95,28 +106,148 @@ func (s *UserService) CreateUser(ctx context.Context, param CreateUserParam) (*m
 	}
 
 	if err := s.userRepo.Create(ctx, user); err != nil {
-		return nil, fmt.Errorf("create user failed: %w", err)
+		return nil, fmt.Errorf("创建用户失败: %w", err)
 	}
 	return user, nil
 }
 
-func (s *UserService) UpdateUser(ctx context.Context, user *model.SysUser) error {
+func (s *UserService) ResetPassword(ctx context.Context, userID int64, newPassword string) error {
+	user, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("用户不存在: %w", err)
+	}
+	user.PasswordHash = HashPassword(newPassword)
 	user.UpdatedAt = time.Now()
 	return s.userRepo.Update(ctx, user)
 }
 
-func (s *UserService) BindSubAccount(ctx context.Context, masterUserID, subUserID int64) error {
-	return s.userRepo.BindSubAccount(ctx, masterUserID, subUserID)
+func (s *UserService) UpdateUserRole(ctx context.Context, userID int64, newRole string) error {
+	user, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("用户不存在: %w", err)
+	}
+	user.Role = newRole
+	user.UpdatedAt = time.Now()
+	return s.userRepo.Update(ctx, user)
 }
 
-func (s *UserService) UnbindSubAccount(ctx context.Context, masterUserID, subUserID int64) error {
-	return s.userRepo.UnbindSubAccount(ctx, masterUserID, subUserID)
+func (s *UserService) DeleteUser(ctx context.Context, userID int64) error {
+	_ = s.userRepo.DeleteSubAccountRelationsForUser(ctx, userID)
+	return s.userRepo.Delete(ctx, userID)
 }
 
-func (s *UserService) ReplaceLandingPages(ctx context.Context, platformCode string, userID int64, lpIDs []string) error {
-	return s.userRepo.ReplaceLandingPages(ctx, platformCode, userID, lpIDs)
+func (s *UserService) GetLandingPageConfigs(ctx context.Context, platformCode string, userID int64) ([]dto.LandingPageConfigItem, []string, error) {
+	pCode := strings.ToLower(platformCode)
+	if pCode == "" {
+		pCode = "all"
+	}
+	pages, err := s.userRepo.FindLandingPages(ctx, pCode, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	items := make([]dto.LandingPageConfigItem, 0, len(pages))
+	ids := make([]string, 0, len(pages))
+	for _, p := range pages {
+		if p.LandingPageID == "__EMPTY__" {
+			continue
+		}
+		items = append(items, dto.LandingPageConfigItem{
+			PlatformCode:  p.PlatformCode,
+			LandingPageID: p.LandingPageID,
+			Timezone:      p.Timezone,
+		})
+		ids = append(ids, p.LandingPageID)
+	}
+	return items, ids, nil
 }
 
-func (s *UserService) GetLandingPages(ctx context.Context, platformCode string, userID int64) ([]*model.UserLandingPage, error) {
-	return s.userRepo.FindLandingPages(ctx, platformCode, userID)
+func (s *UserService) UpdateLandingPageConfigs(ctx context.Context, platformCode string, userID int64, items []dto.LandingPageConfigItem) error {
+	pCode := strings.ToLower(platformCode)
+	if pCode == "" || pCode == "all" {
+		pCode = "rocnovel"
+	}
+
+	pages := make([]*model.UserLandingPage, 0, len(items))
+	seen := make(map[string]bool)
+	for _, item := range items {
+		pid := strings.TrimSpace(item.LandingPageID)
+		if pid == "" || pid == "__EMPTY__" {
+			continue
+		}
+		itemPCode := strings.ToLower(item.PlatformCode)
+		if itemPCode == "" {
+			itemPCode = pCode
+		}
+		key := itemPCode + "_" + pid
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		tz := strings.ToUpper(strings.TrimSpace(item.Timezone))
+		if tz == "" || tz == "BJ" {
+			if itemPCode == "flicknovel" {
+				tz = "UTC"
+			} else {
+				tz = "CST"
+			}
+		}
+
+		pages = append(pages, &model.UserLandingPage{
+			PlatformCode:  itemPCode,
+			UserID:        userID,
+			LandingPageID: pid,
+			Timezone:      tz,
+		})
+	}
+
+	if len(pages) == 0 {
+		pages = append(pages, &model.UserLandingPage{
+			PlatformCode:  pCode,
+			UserID:        userID,
+			LandingPageID: "__EMPTY__",
+			Timezone:      "CST",
+		})
+	}
+
+	return s.userRepo.ReplaceLandingPageConfigs(ctx, pCode, userID, pages)
+}
+
+func (s *UserService) GetAllPlatformLandingPageIds(ctx context.Context, platformCode string) ([]string, error) {
+	pCode := strings.ToLower(platformCode)
+	if pCode == "" {
+		pCode = "rocnovel"
+	}
+
+	seen := make(map[string]bool)
+	var result []string
+
+	if pCode == "flicknovel" && s.flicknovelRepo != nil {
+		promos, err := s.flicknovelRepo.FindAllPromotionIDs(ctx)
+		if err == nil {
+			for _, pid := range promos {
+				clean := strings.TrimSpace(pid)
+				if clean != "" && !seen[clean] {
+					seen[clean] = true
+					result = append(result, clean)
+				}
+			}
+		}
+	}
+
+	if s.orderRepo != nil {
+		orderPids, err := s.orderRepo.FindDistinctLandingPageIDs(ctx, pCode)
+		if err == nil {
+			for _, pid := range orderPids {
+				clean := strings.TrimSpace(pid)
+				if clean != "" && !seen[clean] {
+					seen[clean] = true
+					result = append(result, clean)
+				}
+			}
+		}
+	}
+
+	return result, nil
 }
