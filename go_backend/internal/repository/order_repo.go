@@ -101,3 +101,56 @@ func (r *OrderRepository) FindDistinctLandingPageIDs(ctx context.Context, platfo
 	err := q.Distinct().Pluck("landing_page_id", &ids).Error
 	return ids, err
 }
+
+// FindOrdersByLandingPageIDs 查询指定落地页的所有有效订单 (不限注册时间)
+func (r *OrderRepository) FindOrdersByLandingPageIDs(
+	ctx context.Context,
+	platformCode string,
+	landingPageIDs []string,
+) ([]*model.RawOrder, error) {
+	if landingPageIDs != nil && len(landingPageIDs) == 0 {
+		return []*model.RawOrder{}, nil
+	}
+	var orders []*model.RawOrder
+	q := r.db.WithContext(ctx).Where("pay_state = 1")
+	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
+		if strings.EqualFold(platformCode, "rocnovel") {
+			q = q.Where("(platform_code = 'rocnovel' OR platform_code IS NULL OR platform_code = '' OR platform_code = 'ALL')")
+		} else {
+			q = q.Where("platform_code = ?", strings.ToLower(platformCode))
+		}
+	}
+	if len(landingPageIDs) > 0 {
+		q = q.Where("landing_page_id IN ?", landingPageIDs)
+	}
+	err := q.Order("register_time_bj asc, pay_time_bj asc").Find(&orders).Error
+	return orders, err
+}
+
+// FindSubscriptionPeriodsMap 批量查询订阅用户的周期字典
+func (r *OrderRepository) FindSubscriptionPeriodsMap(ctx context.Context, memberIDs []string) (map[string]int, error) {
+	periodMap := make(map[string]int)
+	if len(memberIDs) == 0 {
+		return periodMap, nil
+	}
+	chunkSize := 500
+	for i := 0; i < len(memberIDs); i += chunkSize {
+		end := i + chunkSize
+		if end > len(memberIDs) {
+			end = len(memberIDs)
+		}
+		var list []*model.UserSubscriptionPeriod
+		err := r.db.WithContext(ctx).Select("member_id, sub_period_days").
+			Where("member_id IN ?", memberIDs[i:end]).Find(&list).Error
+		if err != nil {
+			return periodMap, err
+		}
+		for _, item := range list {
+			mID := strings.TrimSpace(item.MemberID)
+			if mID != "" && item.SubPeriodDays > 0 {
+				periodMap[mID] = item.SubPeriodDays
+			}
+		}
+	}
+	return periodMap, nil
+}

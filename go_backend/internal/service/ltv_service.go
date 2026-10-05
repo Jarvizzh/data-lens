@@ -82,7 +82,6 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 	totalSpend := decimal.Zero
 	totalRecharge := decimal.Zero
 	totalSubUsers := 0
-	totalRetainedSubUsers := 0
 	cohortCurves := make(map[*model.LtvDailyStat][]float64)
 	minLaunchDate := todayBj
 
@@ -90,9 +89,6 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 		totalSpend = totalSpend.Add(stat.Spend)
 		totalRecharge = totalRecharge.Add(stat.TotalRecharge)
 		totalSubUsers += stat.SubUserCount
-		if stat.Day7SubUserCount != nil {
-			totalRetainedSubUsers += *stat.Day7SubUserCount
-		}
 
 		lDate, err := time.ParseInLocation(timeutil.DateLayout, stat.LaunchDate, timeutil.BeijingZone)
 		if err == nil {
@@ -106,15 +102,32 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 	}
 
 	overallPred := s.predictSvc.facade.AssembleOverallPrediction(totalSpend, totalRecharge, stats, cohortCurves, minLaunchDate, todayBj)
-	monthlySummary := s.monthlySummarySvc.BuildMonthlySummary(ctx, stats)
 
-	retainedRateStr := "0.00%"
-	if totalSubUsers > 0 {
-		rate := decimal.NewFromInt(int64(totalRetainedSubUsers)).
-			DivRound(decimal.NewFromInt(int64(totalSubUsers)), 4).
-			Mul(decimal.NewFromInt(100))
-		retainedRateStr = fmt.Sprintf("%.2f%%", rate.InexactFloat64())
+	// 获取用户落地页时区映射与实际订单，用于精确计算订阅留存与月度汇总
+	userPages, lpIDs, _ := s.userSvc.GetLandingPageConfigs(ctx, targetPlatform, targetUserID)
+	tzMap := make(map[string]string, len(userPages))
+	for _, lp := range userPages {
+		tzMap[lp.LandingPageID] = lp.Timezone
 	}
+
+	userOrders, _ := s.orderRepo.FindOrdersByLandingPageIDs(ctx, targetPlatform, lpIDs)
+
+	// 预加载所有订阅用户的周期配置字典
+	var subMemberIDs []string
+	subSeen := make(map[string]bool)
+	for _, o := range userOrders {
+		if o.IsSubs == 1 && strings.TrimSpace(o.MemberID) != "" {
+			mID := strings.TrimSpace(o.MemberID)
+			if !subSeen[mID] {
+				subSeen[mID] = true
+				subMemberIDs = append(subMemberIDs, mID)
+			}
+		}
+	}
+	periodMap, _ := s.orderRepo.FindSubscriptionPeriodsMap(ctx, subMemberIDs)
+
+	overallRetention := CalculateRetainedSubscribers(userOrders, tzMap, periodMap)
+	monthlySummary := s.monthlySummarySvc.BuildMonthlySummary(ctx, stats, userOrders, tzMap, periodMap)
 
 	resp := &dto.LtvListResponseDto{
 		Code:                          0,
@@ -129,8 +142,8 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 		OverallPredictedDay60Recharge: overallPred.PredictedDay60Recharge,
 		OverallPredictedDay90Recharge: overallPred.PredictedDay90Recharge,
 		MonthlySummary:                monthlySummary,
-		OverallRetainedSubUsers:       totalRetainedSubUsers,
-		OverallRetainedRate:           retainedRateStr,
+		OverallRetainedSubUsers:       overallRetention.RetainedSubUsers,
+		OverallRetainedRate:           overallRetention.RetainedRate,
 		Total:                         len(stats),
 		UserID:                        targetUserID,
 	}
