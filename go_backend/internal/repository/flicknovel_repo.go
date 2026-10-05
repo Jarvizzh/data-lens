@@ -55,3 +55,15 @@ func (r *FlicknovelRepository) BatchUpsertRelations(ctx context.Context, list []
 		UpdateAll: true,
 	}).CreateInBatches(list, 200).Error
 }
+
+func (r *FlicknovelRepository) CountPromotions(ctx context.Context) (int64, error) {
+	var count int64
+	err := r.db.WithContext(ctx).Model(&model.FlicknovelPromotion{}).Count(&count).Error
+	return count, err
+}
+
+func (r *FlicknovelRepository) CountTemplates(ctx context.Context) (int64, error) {
+	var count int64
+	err := r.db.WithContext(ctx).Model(&model.FlicknovelRechargeTemplate{}).Count(&count).Error
+	return count, err
+}

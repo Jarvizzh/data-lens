@@ -19,3 +19,11 @@ type PlatformConfig struct {
 }
 
 func (PlatformConfig) TableName() string { return "platform_config" }
+
+// PlatformItemDto 前端下拉选项与元数据传输对象
+type PlatformItemDto struct {
+	Code            string `json:"code"`
+	Name            string `json:"name"`
+	Enabled         bool   `json:"enabled"`
+	LaunchStartDate string `json:"launchStartDate"`
+}

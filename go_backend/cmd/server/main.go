@@ -82,15 +82,18 @@ func main() {
 	}
 	defer scheduler.Stop()
 
+	flicknovelHandler := handler.NewFlicknovelHandler(syncMgr, platformRepo)
+
 	// 8. 装配 HTTP 控制器与路由
 	r := handler.SetupRouter(handler.RouterParams{
 		AuthHandler:       handler.NewAuthHandler(userSvc),
 		LtvHandler:        handler.NewLtvHandler(ltvSvc, dailyDistSvc, permSvc, syncMgr, predictSvc),
 		UserHandler:       handler.NewUserHandler(userSvc, permSvc, ltvSvc),
 		AdminHandler:      handler.NewAdminHandler(userSvc, permSvc, ltvSvc),
-		SettlementHandler: handler.NewSettlementHandler(settleSvc, permSvc),
-		PlatformHandler:   handler.NewPlatformHandler(platformRepo, syncMgr),
+		SettlementHandler: handler.NewSettlementHandler(settleSvc, permSvc, userRepo),
+		PlatformHandler:   handler.NewPlatformHandler(platformRepo, userRepo, syncMgr),
 		TokenHandler:      handler.NewTokenHandler(rocnovelClient),
+		FlicknovelHandler: flicknovelHandler,
 	})
 
 	srv := &http.Server{

@@ -203,3 +203,66 @@ func (h *LtvHandler) SyncAndCalc(c *gin.Context) {
 	_ = h.ltvSvc.CalculateAllLtvStats(c.Request.Context())
 	response.SuccessWithMsg(c, "数据同步与重新计算完成", nil)
 }
+
+// RecalculateDailyDistribution 仅重算每日充值分布 (/api/ltv/recalculate-daily-distribution)
+func (h *LtvHandler) RecalculateDailyDistribution(c *gin.Context) {
+	platformCode := c.DefaultQuery("platformCode", "ALL")
+	targetUID := h.resolveTargetUserID(c)
+
+	resp, err := h.distSvc.RecalculateDailyDistribution(c.Request.Context(), platformCode, targetUID)
+	if err != nil {
+		response.Error(c, 500, "重算每日充值分析失败: "+err.Error())
+		return
+	}
+	resp.Msg = "重算每日充值分析完成！"
+	c.JSON(http.StatusOK, resp)
+}
+
+// GetBenchmark 获取 LTV 预测基准数据曲线 (/api/ltv/benchmark)
+func (h *LtvHandler) GetBenchmark(c *gin.Context) {
+	platformCode := c.Query("platformCode")
+	dimensionType := c.DefaultQuery("dimensionType", "ALL")
+	dimensionValue := c.DefaultQuery("dimensionValue", "DEFAULT")
+	subPeriodDays, _ := strconv.Atoi(c.DefaultQuery("subPeriodDays", "1"))
+
+	curve, err := h.predictSvc.GetBenchmarkCurve(c.Request.Context(), platformCode, dimensionType, dimensionValue, subPeriodDays)
+	if err != nil {
+		response.Error(c, 500, "查询预测基准数据失败: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":  0,
+		"data":  curve,
+		"total": len(curve),
+	})
+}
+
+// RecalculateBenchmark 手动重算预测基准库 (/api/ltv/recalculate-benchmark)
+func (h *LtvHandler) RecalculateBenchmark(c *gin.Context) {
+	if err := h.predictSvc.RecalculateAllBenchmarks(c.Request.Context()); err != nil {
+		response.Error(c, 500, "重算基准库失败: "+err.Error())
+		return
+	}
+	response.SuccessWithMsg(c, "LTV 预测基准库重新计算完成", nil)
+}
+
+// SyncSubscribeConfigs 手动触发拉取订阅配置版本库 (/api/ltv/sync-subscribe-configs)
+func (h *LtvHandler) SyncSubscribeConfigs(c *gin.Context) {
+	platformCode := c.DefaultQuery("platformCode", "rocnovel")
+	count := 0
+	if h.syncMgr != nil {
+		var err error
+		count, err = h.syncMgr.SyncConfigsForPlatform(c.Request.Context(), platformCode)
+		if err != nil {
+			response.Error(c, 500, "同步订阅配置失败: "+err.Error())
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":              0,
+		"msg":               "平台落地页与订阅配置版本数据同步完成",
+		"savedVersionCount": count,
+	})
+}

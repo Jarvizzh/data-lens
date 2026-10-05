@@ -6,6 +6,7 @@ import (
 
 	"go_backend/internal/middleware"
 	"go_backend/internal/pkg/response"
+	"go_backend/internal/repository"
 	"go_backend/internal/service"
 	"go_backend/internal/service/dto"
 
@@ -15,23 +16,47 @@ import (
 type SettlementHandler struct {
 	settleSvc *service.SettlementService
 	permSvc   *service.UserPermissionService
+	userRepo  *repository.UserRepository
 }
 
-func NewSettlementHandler(settleSvc *service.SettlementService, permSvc *service.UserPermissionService) *SettlementHandler {
+func NewSettlementHandler(
+	settleSvc *service.SettlementService,
+	permSvc *service.UserPermissionService,
+	userRepo *repository.UserRepository,
+) *SettlementHandler {
 	return &SettlementHandler{
 		settleSvc: settleSvc,
 		permSvc:   permSvc,
+		userRepo:  userRepo,
 	}
+}
+
+func (h *SettlementHandler) checkPermission(c *gin.Context) bool {
+	u := middleware.GetCurrentUser(c)
+	if u == nil {
+		response.Unauthorized(c, "未登录")
+		return false
+	}
+	if strings.EqualFold(u.Role, "SUPER_ADMIN") {
+		return true
+	}
+	if h.userRepo != nil {
+		user, err := h.userRepo.FindByID(c.Request.Context(), u.UserID)
+		if err == nil && user != nil && user.PermSettlement == 1 {
+			return true
+		}
+	}
+	response.Error(c, 403, "无权访问，您未开通月份结算权限")
+	return false
 }
 
 // GetAccounts 获取参与结算的账号列表 (/api/settlement/accounts)
 func (h *SettlementHandler) GetAccounts(c *gin.Context) {
-	u := middleware.GetCurrentUser(c)
-	if u == nil {
-		response.Unauthorized(c, "未登录")
+	if !h.checkPermission(c) {
 		return
 	}
 
+	u := middleware.GetCurrentUser(c)
 	accounts, err := h.permSvc.GetSettlementAccountsForUser(c.Request.Context(), u.UserID)
 	if err != nil {
 		response.Error(c, 500, "获取结算账号失败: "+err.Error())
@@ -43,12 +68,11 @@ func (h *SettlementHandler) GetAccounts(c *gin.Context) {
 
 // GetList 获取月份结算明细列表 (/api/settlement/list)
 func (h *SettlementHandler) GetList(c *gin.Context) {
-	u := middleware.GetCurrentUser(c)
-	if u == nil {
-		response.Unauthorized(c, "未登录")
+	if !h.checkPermission(c) {
 		return
 	}
 
+	u := middleware.GetCurrentUser(c)
 	platformCode := c.Query("platformCode")
 	settlementType := c.DefaultQuery("settlementType", "PLATFORM_ALL")
 	var targetUserID *int64
@@ -79,12 +103,11 @@ func (h *SettlementHandler) GetList(c *gin.Context) {
 
 // SaveConfig 保存结算参数配置 (/api/settlement/save)
 func (h *SettlementHandler) SaveConfig(c *gin.Context) {
-	u := middleware.GetCurrentUser(c)
-	if u == nil {
-		response.Unauthorized(c, "未登录")
+	if !h.checkPermission(c) {
 		return
 	}
 
+	u := middleware.GetCurrentUser(c)
 	var req dto.MonthlySettlementSaveRequestDto
 	if err := c.ShouldBindJSON(&req); err != nil || req.MonthStr == "" {
 		response.Error(c, 400, "参数错误")

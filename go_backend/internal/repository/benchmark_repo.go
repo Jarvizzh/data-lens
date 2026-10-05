@@ -61,3 +61,19 @@ func (r *BenchmarkRepository) BatchUpsertUserSubscriptionPeriods(ctx context.Con
 	}
 	return r.db.WithContext(ctx).CreateInBatches(periods, 100).Error
 }
+
+func (r *BenchmarkRepository) DeleteBenchmarksByDim(ctx context.Context, dimType, dimValue string, periodDays int) error {
+	return r.db.WithContext(ctx).
+		Where("dimension_type = ? AND dimension_value = ? AND sub_period_days = ?", dimType, dimValue, periodDays).
+		Delete(&model.LtvPredictBenchmark{}).Error
+}
+
+func (r *BenchmarkRepository) BatchUpsertBenchmarks(ctx context.Context, list []*model.LtvPredictBenchmark) error {
+	if len(list) == 0 {
+		return nil
+	}
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "id"}},
+		UpdateAll: true,
+	}).CreateInBatches(list, 100).Error
+}

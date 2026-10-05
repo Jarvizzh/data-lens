@@ -1,6 +1,10 @@
 package handler
 
 import (
+	"strings"
+
+	"go_backend/internal/middleware"
+	"go_backend/internal/model"
 	"go_backend/internal/pkg/response"
 	"go_backend/internal/pkg/timeutil"
 	"go_backend/internal/repository"
@@ -11,23 +15,116 @@ import (
 
 type PlatformHandler struct {
 	platformRepo *repository.PlatformRepository
+	userRepo     *repository.UserRepository
 	syncMgr      *service.SyncManager
 }
 
-func NewPlatformHandler(platformRepo *repository.PlatformRepository, syncMgr *service.SyncManager) *PlatformHandler {
+func NewPlatformHandler(
+	platformRepo *repository.PlatformRepository,
+	userRepo *repository.UserRepository,
+	syncMgr *service.SyncManager,
+) *PlatformHandler {
 	return &PlatformHandler{
 		platformRepo: platformRepo,
+		userRepo:     userRepo,
 		syncMgr:      syncMgr,
 	}
 }
 
-func (h *PlatformHandler) ListPlatforms(c *gin.Context) {
-	list, err := h.platformRepo.FindAll(c.Request.Context())
-	if err != nil {
-		response.Error(c, 500, "查询平台失败: "+err.Error())
-		return
+// HasPlatformAccess 校验用户是否拥有指定平台的访问权限 (与 Java SysUser.hasPlatformAccess 严格对齐)
+func HasPlatformAccess(user *model.SysUser, platformCode string) bool {
+	if user == nil || strings.EqualFold(user.Role, "SUPER_ADMIN") {
+		return true
 	}
-	response.Success(c, list)
+	allowed := strings.TrimSpace(user.AllowedPlatforms)
+	if allowed == "" {
+		allowed = "ALL"
+	}
+	parts := strings.Split(allowed, ",")
+	set := make(map[string]bool)
+	for _, p := range parts {
+		clean := strings.ToLower(strings.TrimSpace(p))
+		if clean != "" {
+			set[clean] = true
+		}
+	}
+	if set["all"] {
+		return true
+	}
+	reqCode := strings.ToLower(strings.TrimSpace(platformCode))
+	if reqCode == "" || reqCode == "all" {
+		return set["all"]
+	}
+	return set[reqCode]
+}
+
+// ListPlatforms 获取系统平台列表 (对齐 Java PlatformController.listPlatforms 格式)
+func (h *PlatformHandler) ListPlatforms(c *gin.Context) {
+	var user *model.SysUser
+	if u := middleware.GetCurrentUser(c); u != nil && h.userRepo != nil {
+		user, _ = h.userRepo.FindByID(c.Request.Context(), u.UserID)
+	}
+
+	result := make([]model.PlatformItemDto, 0)
+
+	// 1. 若拥有 ALL 权限，首项返回大盘汇总
+	if HasPlatformAccess(user, "ALL") {
+		result = append(result, model.PlatformItemDto{
+			Code:            "ALL",
+			Name:            "大盘汇总",
+			Enabled:         true,
+			LaunchStartDate: "2026-07-10",
+		})
+	}
+
+	// 2. 从数据库配置中读取已配置的平台
+	addedCodes := make(map[string]bool)
+	configs, err := h.platformRepo.FindAll(c.Request.Context())
+	if err == nil && len(configs) > 0 {
+		for _, cfg := range configs {
+			if cfg.Status == 1 && HasPlatformAccess(user, cfg.PlatformCode) {
+				startDate := cfg.LaunchStartDate
+				if startDate == "" {
+					if strings.EqualFold(cfg.PlatformCode, "flicknovel") {
+						startDate = "2026-09-16"
+					} else {
+						startDate = "2026-07-10"
+					}
+				} else if len(startDate) >= 10 {
+					startDate = startDate[:10]
+				}
+				result = append(result, model.PlatformItemDto{
+					Code:            cfg.PlatformCode,
+					Name:            cfg.PlatformName,
+					Enabled:         true,
+					LaunchStartDate: startDate,
+				})
+				addedCodes[strings.ToLower(cfg.PlatformCode)] = true
+			}
+		}
+	}
+
+	// 3. 兜底内建平台 (rocnovel, flicknovel) 若未落库时自动补齐
+	if !addedCodes["rocnovel"] && HasPlatformAccess(user, "rocnovel") {
+		result = append(result, model.PlatformItemDto{
+			Code:            "rocnovel",
+			Name:            "中文在线",
+			Enabled:         true,
+			LaunchStartDate: "2026-07-10",
+		})
+		addedCodes["rocnovel"] = true
+	}
+	if !addedCodes["flicknovel"] && HasPlatformAccess(user, "flicknovel") {
+		result = append(result, model.PlatformItemDto{
+			Code:            "flicknovel",
+			Name:            "番茄司南",
+			Enabled:         true,
+			LaunchStartDate: "2026-09-16",
+		})
+		addedCodes["flicknovel"] = true
+	}
+
+	response.Success(c, result)
 }
 
 func (h *PlatformHandler) TriggerSync(c *gin.Context) {

@@ -36,6 +36,10 @@ func (r *PlatformRepository) SavePlatform(ctx context.Context, cfg *model.Platfo
 	return r.db.WithContext(ctx).Save(cfg).Error
 }
 
+func (r *PlatformRepository) Save(ctx context.Context, cfg *model.PlatformConfig) error {
+	return r.SavePlatform(ctx, cfg)
+}
+
 // SystemConfig
 func (r *PlatformRepository) GetSystemConfig(ctx context.Context, key string) (string, error) {
 	var cfg model.SystemConfig

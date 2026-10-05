@@ -14,6 +14,7 @@ type RouterParams struct {
 	SettlementHandler *SettlementHandler
 	PlatformHandler   *PlatformHandler
 	TokenHandler      *TokenHandler
+	FlicknovelHandler *FlicknovelHandler
 }
 
 func SetupRouter(p RouterParams) *gin.Engine {
@@ -57,8 +58,12 @@ func SetupRouter(p RouterParams) *gin.Engine {
 				ltv.POST("/batch-spend", p.LtvHandler.BatchSpend)
 				ltv.POST("/recalculate", p.LtvHandler.Recalculate)
 				ltv.POST("/recalculate-ltv", p.LtvHandler.Recalculate)
+				ltv.POST("/recalculate-daily-distribution", p.LtvHandler.RecalculateDailyDistribution)
 				ltv.POST("/sync-orders", p.LtvHandler.SyncOrders)
 				ltv.POST("/sync-and-calc", p.LtvHandler.SyncAndCalc)
+				ltv.GET("/benchmark", p.LtvHandler.GetBenchmark)
+				ltv.POST("/recalculate-benchmark", p.LtvHandler.RecalculateBenchmark)
+				ltv.POST("/sync-subscribe-configs", p.LtvHandler.SyncSubscribeConfigs)
 			}
 
 			// 月份结算
@@ -74,6 +79,20 @@ func SetupRouter(p RouterParams) *gin.Engine {
 			{
 				token.GET("/get", p.TokenHandler.GetToken)
 				token.POST("/update", p.TokenHandler.UpdateToken)
+			}
+
+			// 番茄司南系统管理
+			if p.FlicknovelHandler != nil {
+				fn := protected.Group("/flicknovel")
+				{
+					fn.POST("/sync/orders", p.FlicknovelHandler.SyncOrders)
+					fn.POST("/sync/relations", p.FlicknovelHandler.SyncRelations)
+					fn.POST("/sync/configs", p.FlicknovelHandler.SyncConfigs)
+					fn.POST("/sync/promotions-and-templates", p.FlicknovelHandler.SyncPromotionsAndTemplates)
+					fn.GET("/cache/stats", p.FlicknovelHandler.GetCacheStats)
+					fn.GET("/config", p.FlicknovelHandler.GetConfig)
+					fn.POST("/config/update", p.FlicknovelHandler.UpdateConfig)
+				}
 			}
 
 			// 管理员接口

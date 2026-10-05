@@ -58,7 +58,11 @@ func (h *UserHandler) GetLandingPages(c *gin.Context) {
 
 	platformCode := c.DefaultQuery("platformCode", "rocnovel")
 	targetUID := u.UserID
-	if uidStr := c.Query("targetUserId"); uidStr != "" {
+	if paramID := c.Param("id"); paramID != "" {
+		if uid, err := strconv.ParseInt(paramID, 10, 64); err == nil && uid > 0 {
+			targetUID = uid
+		}
+	} else if uidStr := c.Query("targetUserId"); uidStr != "" {
 		if uid, err := strconv.ParseInt(uidStr, 10, 64); err == nil && uid > 0 {
 			targetUID = uid
 		}

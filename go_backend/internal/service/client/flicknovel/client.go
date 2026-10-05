@@ -27,6 +27,28 @@ func NewClient(cfg *config.FlicknovelAPI) *Client {
 	}
 }
 
+func (c *Client) GetConfig() (baseURL, companyID, privateKey, defaultEmail string) {
+	if c.cfg == nil {
+		return "", "", "", ""
+	}
+	return c.cfg.BaseURL, c.cfg.CompanyID, c.cfg.PrivateKey, c.cfg.DefaultEmail
+}
+
+func (c *Client) UpdateCredentials(companyID, privateKey, defaultEmail string) {
+	if c.cfg == nil {
+		c.cfg = &config.FlicknovelAPI{}
+	}
+	if companyID != "" {
+		c.cfg.CompanyID = companyID
+	}
+	if privateKey != "" {
+		c.cfg.PrivateKey = privateKey
+	}
+	if defaultEmail != "" {
+		c.cfg.DefaultEmail = defaultEmail
+	}
+}
+
 func (c *Client) post(ctx context.Context, apiPath string, bodyObj interface{}, resultObj interface{}) error {
 	bodyJSON := "{}"
 	if bodyObj != nil {

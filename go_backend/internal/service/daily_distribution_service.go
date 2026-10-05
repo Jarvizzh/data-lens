@@ -72,6 +72,27 @@ func (s *DailyDistributionService) GetDailyDistributionResponse(
 	}, nil
 }
 
+// RecalculateDailyDistribution 重新计算指定用户/平台的每日充值分布统计
+func (s *DailyDistributionService) RecalculateDailyDistribution(
+	ctx context.Context,
+	platformCode string,
+	targetUserID int64,
+) (*dto.DailyDistributionResponseDto, error) {
+	pCode := strings.ToLower(platformCode)
+	if pCode == "" {
+		pCode = "all"
+	}
+	if targetUserID <= 0 {
+		targetUserID = 1
+	}
+
+	if s.calcSvc != nil {
+		_ = s.calcSvc.CalculateDailyDistributionForUser(ctx, pCode, targetUserID)
+	}
+
+	return s.GetDailyDistributionResponse(ctx, platformCode, targetUserID)
+}
+
 // GetGlobalDailyDistributionResponse 获取全盘每日充值分布
 func (s *DailyDistributionService) GetGlobalDailyDistributionResponse(
 	ctx context.Context,

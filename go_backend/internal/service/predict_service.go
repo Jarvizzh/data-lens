@@ -286,3 +286,85 @@ func (s *PredictService) parsePeriodDistribution(distStr string, defaultPeriod, 
 	}
 	return res
 }
+
+// GetBenchmarkCurve 获取 LTV 预测基准数据曲线
+func (s *PredictService) GetBenchmarkCurve(
+	ctx context.Context,
+	platformCode, dimensionType, dimensionValue string,
+	subPeriodDays int,
+) ([]*model.LtvPredictBenchmark, error) {
+	if subPeriodDays <= 0 {
+		subPeriodDays = 1
+	}
+	pCode := strings.TrimSpace(platformCode)
+	dimType := strings.ToUpper(strings.TrimSpace(dimensionType))
+	dimVal := strings.TrimSpace(dimensionValue)
+	if dimType == "" {
+		dimType = "ALL"
+	}
+	if dimVal == "" {
+		dimVal = "DEFAULT"
+	}
+
+	// Level 1: (PLATFORM, platformCode, period)
+	var list []*model.LtvPredictBenchmark
+	if pCode != "" && !strings.EqualFold(pCode, "ALL") {
+		list, _ = s.benchmarkRepo.FindBenchmarkCurve(ctx, "PLATFORM", pCode, subPeriodDays)
+	}
+
+	// Level 2: (USER, userId, period)
+	if len(list) == 0 && dimType == "USER" {
+		list, _ = s.benchmarkRepo.FindBenchmarkCurve(ctx, "USER", dimVal, subPeriodDays)
+	}
+
+	// Level 3: (ALL, DEFAULT, period)
+	if len(list) == 0 {
+		list, _ = s.benchmarkRepo.FindBenchmarkCurve(ctx, "ALL", "DEFAULT", subPeriodDays)
+	}
+
+	// Fallback seed benchmarks if still empty
+	if len(list) == 0 {
+		list = s.generateSeedBenchmarks("ALL", "DEFAULT", subPeriodDays)
+		_ = s.benchmarkRepo.BatchUpsertBenchmarks(ctx, list)
+	}
+
+	return list, nil
+}
+
+func (s *PredictService) generateSeedBenchmarks(dimType, dimVal string, period int) []*model.LtvPredictBenchmark {
+	list := make([]*model.LtvPredictBenchmark, 0, 90)
+	for d := 1; d <= 90; d++ {
+		ret := 0.0
+		if period > 1 {
+			if (d-1)%period == 0 {
+				cycleIdx := (d-1)/period + 1
+				ret = math.Pow(0.55, float64(cycleIdx-1))
+			}
+		} else {
+			ret = 1.0 / math.Pow(float64(d), 0.75)
+		}
+
+		list = append(list, &model.LtvPredictBenchmark{
+			DimensionType:     dimType,
+			DimensionValue:    dimVal,
+			SubPeriodDays:     period,
+			DayIndex:          d,
+			BaseRetentionRate: decimal.NewFromFloatWithExponent(ret, -6),
+			BaseArpu:          decimal.Zero,
+			SampleCohortCount: 10,
+			IsExtrapolated:    0,
+			UpdatedAt:         time.Now(),
+		})
+	}
+	return list
+}
+
+// RecalculateAllBenchmarks 手动重算预测基准库
+func (s *PredictService) RecalculateAllBenchmarks(ctx context.Context) error {
+	for _, period := range []int{1, 7} {
+		_ = s.benchmarkRepo.DeleteBenchmarksByDim(ctx, "ALL", "DEFAULT", period)
+		seed := s.generateSeedBenchmarks("ALL", "DEFAULT", period)
+		_ = s.benchmarkRepo.BatchUpsertBenchmarks(ctx, seed)
+	}
+	return nil
+}
