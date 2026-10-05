@@ -177,6 +177,14 @@ func (c *LtvCalculator) GetLaunchStartDateForPlatform(platformCode string) strin
 	}
 }
 
+func formatDate10(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 10 {
+		return s[:10]
+	}
+	return s
+}
+
 // GetEffectiveRegisterDate 提取订单的生效注册日期 (按落地页 ID 区分 UTC、美东与北京时间)
 func GetEffectiveRegisterDate(o *model.RawOrder, tzMap map[string]string) string {
 	if o == nil {
@@ -197,34 +205,32 @@ func GetEffectiveRegisterDate(o *model.RawOrder, tzMap map[string]string) string
 		tz = "CST"
 	}
 
+	var res string
 	if tz == "UTC" {
 		if o.RegisterDateUTC != "" {
-			return o.RegisterDateUTC
+			res = o.RegisterDateUTC
+		} else if o.RegisterTimeUTC != nil && !o.RegisterTimeUTC.IsZero() {
+			res = o.RegisterTimeUTC.UTC().Format(timeutil.DateLayout)
+		} else if !o.RegisterTimeBJ.IsZero() {
+			res = o.RegisterTimeBJ.Add(-8 * time.Hour).Format(timeutil.DateLayout)
+		} else {
+			res = o.RegisterDateET
 		}
-		if o.RegisterTimeUTC != nil && !o.RegisterTimeUTC.IsZero() {
-			return o.RegisterTimeUTC.UTC().Format(timeutil.DateLayout)
-		}
-		if !o.RegisterTimeBJ.IsZero() {
-			return o.RegisterTimeBJ.Add(-8 * time.Hour).Format(timeutil.DateLayout)
-		}
-		return o.RegisterDateET
-	}
-
-	if tz == "ET" {
+	} else if tz == "ET" {
 		if o.RegisterDateET != "" {
-			return o.RegisterDateET
+			res = o.RegisterDateET
+		} else if !o.RegisterTimeET.IsZero() {
+			res = o.RegisterTimeET.In(timeutil.EasternZone).Format(timeutil.DateLayout)
 		}
-		if !o.RegisterTimeET.IsZero() {
-			return o.RegisterTimeET.In(timeutil.EasternZone).Format(timeutil.DateLayout)
+	} else {
+		// 默认 CST / BJ
+		if !o.RegisterTimeBJ.IsZero() {
+			res = o.RegisterTimeBJ.In(timeutil.BeijingZone).Format(timeutil.DateLayout)
+		} else {
+			res = o.RegisterDateET
 		}
-		return ""
 	}
-
-	// 默认 CST / BJ
-	if !o.RegisterTimeBJ.IsZero() {
-		return o.RegisterTimeBJ.In(timeutil.BeijingZone).Format(timeutil.DateLayout)
-	}
-	return o.RegisterDateET
+	return formatDate10(res)
 }
 
 // GetEffectivePayDate 提取订单的生效支付日期 (按落地页 ID 区分 UTC、美东与北京时间)
@@ -247,32 +253,30 @@ func GetEffectivePayDate(o *model.RawOrder, tzMap map[string]string) string {
 		tz = "CST"
 	}
 
+	var res string
 	if tz == "UTC" {
 		if o.PayDateUTC != "" {
-			return o.PayDateUTC
+			res = o.PayDateUTC
+		} else if o.PayTimeUTC != nil && !o.PayTimeUTC.IsZero() {
+			res = o.PayTimeUTC.UTC().Format(timeutil.DateLayout)
+		} else if !o.PayTimeBJ.IsZero() {
+			res = o.PayTimeBJ.Add(-8 * time.Hour).Format(timeutil.DateLayout)
+		} else {
+			res = o.PayDateET
 		}
-		if o.PayTimeUTC != nil && !o.PayTimeUTC.IsZero() {
-			return o.PayTimeUTC.UTC().Format(timeutil.DateLayout)
-		}
-		if !o.PayTimeBJ.IsZero() {
-			return o.PayTimeBJ.Add(-8 * time.Hour).Format(timeutil.DateLayout)
-		}
-		return o.PayDateET
-	}
-
-	if tz == "ET" {
+	} else if tz == "ET" {
 		if o.PayDateET != "" {
-			return o.PayDateET
+			res = o.PayDateET
+		} else if !o.PayTimeET.IsZero() {
+			res = o.PayTimeET.In(timeutil.EasternZone).Format(timeutil.DateLayout)
 		}
-		if !o.PayTimeET.IsZero() {
-			return o.PayTimeET.In(timeutil.EasternZone).Format(timeutil.DateLayout)
+	} else {
+		// 默认 CST / BJ
+		if !o.PayTimeBJ.IsZero() {
+			res = o.PayTimeBJ.In(timeutil.BeijingZone).Format(timeutil.DateLayout)
+		} else {
+			res = o.PayDateET
 		}
-		return ""
 	}
-
-	// 默认 CST / BJ
-	if !o.PayTimeBJ.IsZero() {
-		return o.PayTimeBJ.In(timeutil.BeijingZone).Format(timeutil.DateLayout)
-	}
-	return o.PayDateET
+	return formatDate10(res)
 }

@@ -51,7 +51,11 @@ func (r *OrderRepository) FindOrdersForLtvCalculation(
 	q := r.db.WithContext(ctx).Where("pay_state = 1")
 
 	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
-		q = q.Where("platform_code = ?", strings.ToLower(platformCode))
+		if strings.EqualFold(platformCode, "rocnovel") {
+			q = q.Where("(platform_code = 'rocnovel' OR platform_code IS NULL OR platform_code = '' OR platform_code = 'ALL')")
+		} else {
+			q = q.Where("platform_code = ?", strings.ToLower(platformCode))
+		}
 	}
 	if len(landingPageIDs) > 0 {
 		q = q.Where("landing_page_id IN ?", landingPageIDs)
@@ -64,6 +68,22 @@ func (r *OrderRepository) FindOrdersForLtvCalculation(
 	}
 
 	err := q.Order("register_time_et asc, pay_time_et asc").Find(&orders).Error
+	if err == nil {
+		for _, o := range orders {
+			if len(o.RegisterDateET) >= 10 {
+				o.RegisterDateET = o.RegisterDateET[:10]
+			}
+			if len(o.RegisterDateUTC) >= 10 {
+				o.RegisterDateUTC = o.RegisterDateUTC[:10]
+			}
+			if len(o.PayDateET) >= 10 {
+				o.PayDateET = o.PayDateET[:10]
+			}
+			if len(o.PayDateUTC) >= 10 {
+				o.PayDateUTC = o.PayDateUTC[:10]
+			}
+		}
+	}
 	return orders, err
 }
 
@@ -72,7 +92,11 @@ func (r *OrderRepository) FindDistinctLandingPageIDs(ctx context.Context, platfo
 	var ids []string
 	q := r.db.WithContext(ctx).Model(&model.RawOrder{}).Where("landing_page_id IS NOT NULL AND landing_page_id != ''")
 	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
-		q = q.Where("platform_code = ?", strings.ToLower(platformCode))
+		if strings.EqualFold(platformCode, "rocnovel") {
+			q = q.Where("(platform_code = 'rocnovel' OR platform_code IS NULL OR platform_code = '' OR platform_code = 'ALL')")
+		} else {
+			q = q.Where("platform_code = ?", strings.ToLower(platformCode))
+		}
 	}
 	err := q.Distinct().Pluck("landing_page_id", &ids).Error
 	return ids, err

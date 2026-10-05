@@ -86,7 +86,44 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 	isMissingStartDate := len(stats) > 0 && stats[0].LaunchDate > startDate
 	isMissingToday := len(stats) > 0 && stats[len(stats)-1].LaunchDate < todayStr
 
-	if len(stats) == 0 || allZeros || isMissingStartDate || isMissingToday {
+	needsRecalculate := len(stats) == 0 || allZeros || isMissingStartDate || isMissingToday
+	if !needsRecalculate && len(stats) > 0 {
+		// 检查首部数据：如果前 10 天统计表中 Spend 均为 0，但投放配置表中存在大于 0 的消耗，说明历史数据计算异常，需自动重新计算
+		first10AllSpendZero := true
+		checkLimit := 10
+		if len(stats) < checkLimit {
+			checkLimit = len(stats)
+		}
+		for i := 0; i < checkLimit; i++ {
+			if stats[i].Spend.GreaterThan(decimal.Zero) {
+				first10AllSpendZero = false
+				break
+			}
+		}
+		if first10AllSpendZero {
+			var checkIDs []int64
+			if isMaster, _ := s.userRepo.IsMasterAccount(ctx, targetUserID); isMaster {
+				subIDs, _ := s.userRepo.FindSubAccountIDs(ctx, targetUserID)
+				checkIDs = append(checkIDs, subIDs...)
+			} else {
+				checkIDs = []int64{targetUserID}
+			}
+			var checkPlatform string
+			if !isAll {
+				checkPlatform = targetPlatform
+			}
+			endDateCheck := stats[checkLimit-1].LaunchDate
+			cfgs, _ := s.ltvStatRepo.FindLaunchConfigs(ctx, checkPlatform, checkIDs, startDate, endDateCheck)
+			for _, cfg := range cfgs {
+				if cfg.Spend.GreaterThan(decimal.Zero) {
+					needsRecalculate = true
+					break
+				}
+			}
+		}
+	}
+
+	if needsRecalculate {
 		_ = s.CalculateLtvStatsForUserDirect(ctx, targetPlatform, targetUserID)
 		stats, _ = s.ltvStatRepo.FindStatsByFilter(ctx, targetPlatform, []int64{targetUserID}, startDate, "")
 	}
@@ -192,6 +229,9 @@ func (s *LtvService) CalculateLtvStatsForUserDirect(ctx context.Context, platfor
 	cohortMap := make(map[string][]*model.RawOrder)
 	for _, o := range orders {
 		regDate := GetEffectiveRegisterDate(o, tzMap)
+		if len(regDate) >= 10 {
+			regDate = regDate[:10]
+		}
 		if regDate >= startDate {
 			cohortMap[regDate] = append(cohortMap[regDate], o)
 		}

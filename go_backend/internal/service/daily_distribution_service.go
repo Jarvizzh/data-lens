@@ -55,7 +55,31 @@ func (s *DailyDistributionService) GetDailyDistributionResponse(
 
 	userIDs := []int64{targetUserID}
 	list, err := s.rechargeDistRepo.FindByFilter(ctx, pCode, userIDs, startDate, "")
-	if err != nil || len(list) == 0 {
+	allZeros := len(list) > 0
+	for _, it := range list {
+		if it.TotalRecharge.GreaterThan(decimal.Zero) {
+			allZeros = false
+			break
+		}
+	}
+	needsRecalc := err != nil || len(list) == 0 || allZeros
+	if !needsRecalc && len(list) > 0 {
+		first10AllZero := true
+		checkLimit := 10
+		if len(list) < checkLimit {
+			checkLimit = len(list)
+		}
+		for i := 0; i < checkLimit; i++ {
+			if list[i].TotalRecharge.GreaterThan(decimal.Zero) {
+				first10AllZero = false
+				break
+			}
+		}
+		if first10AllZero {
+			needsRecalc = true
+		}
+	}
+	if needsRecalc {
 		_ = s.calcSvc.CalculateDailyDistributionForUser(ctx, pCode, targetUserID)
 		list, _ = s.rechargeDistRepo.FindByFilter(ctx, pCode, userIDs, startDate, "")
 	}

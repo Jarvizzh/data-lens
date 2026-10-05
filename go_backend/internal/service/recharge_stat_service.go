@@ -68,6 +68,9 @@ func (s *RechargeStatService) CalculateDailyDistributionForUser(ctx context.Cont
 	payDateMap := make(map[string][]*model.RawOrder)
 	for _, o := range orders {
 		payDate := GetEffectivePayDate(o, tzMap)
+		if len(payDate) >= 10 {
+			payDate = payDate[:10]
+		}
 		if payDate >= startDate {
 			payDateMap[payDate] = append(payDateMap[payDate], o)
 		}

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
 )
 
 // RawOrder 订单原始明细表
@@ -34,3 +35,20 @@ type RawOrder struct {
 }
 
 func (RawOrder) TableName() string { return "raw_order" }
+ 
+func (o *RawOrder) AfterFind(tx *gorm.DB) error {
+	if len(o.RegisterDateET) >= 10 {
+		o.RegisterDateET = o.RegisterDateET[:10]
+	}
+	if len(o.RegisterDateUTC) >= 10 {
+		o.RegisterDateUTC = o.RegisterDateUTC[:10]
+	}
+	if len(o.PayDateET) >= 10 {
+		o.PayDateET = o.PayDateET[:10]
+	}
+	if len(o.PayDateUTC) >= 10 {
+		o.PayDateUTC = o.PayDateUTC[:10]
+	}
+	return nil
+}
+

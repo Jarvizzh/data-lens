@@ -224,3 +224,13 @@ func (r *UserRepository) FindAdminLandingPageIDs(ctx context.Context, excludeUse
 		Pluck("landing_page_id", &pids).Error
 	return pids, err
 }
+
+// IsMasterAccount 判断用户是否为主账号
+func (r *UserRepository) IsMasterAccount(ctx context.Context, userID int64) (bool, error) {
+	u, err := r.FindByID(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	return u != nil && u.IsMaster == 1, nil
+}
+
