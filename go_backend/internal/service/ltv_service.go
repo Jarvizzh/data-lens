@@ -73,57 +73,8 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 	}
 
 	todayBj := time.Now().In(timeutil.BeijingZone)
-	todayStr := todayBj.Format(timeutil.DateLayout)
-
-	allZeros := len(stats) > 0
-	for _, st := range stats {
-		if st.Spend.GreaterThan(decimal.Zero) || st.TotalRecharge.GreaterThan(decimal.Zero) {
-			allZeros = false
-			break
-		}
-	}
-
-	isMissingStartDate := len(stats) > 0 && stats[0].LaunchDate > startDate
-	isMissingToday := len(stats) > 0 && stats[len(stats)-1].LaunchDate < todayStr
-
-	needsRecalculate := len(stats) == 0 || allZeros || isMissingStartDate || isMissingToday
-	if !needsRecalculate && len(stats) > 0 {
-		// 检查首部数据：如果前 10 天统计表中 Spend 均为 0，但投放配置表中存在大于 0 的消耗，说明历史数据计算异常，需自动重新计算
-		first10AllSpendZero := true
-		checkLimit := 10
-		if len(stats) < checkLimit {
-			checkLimit = len(stats)
-		}
-		for i := 0; i < checkLimit; i++ {
-			if stats[i].Spend.GreaterThan(decimal.Zero) {
-				first10AllSpendZero = false
-				break
-			}
-		}
-		if first10AllSpendZero {
-			var checkIDs []int64
-			if isMaster, _ := s.userRepo.IsMasterAccount(ctx, targetUserID); isMaster {
-				subIDs, _ := s.userRepo.FindSubAccountIDs(ctx, targetUserID)
-				checkIDs = append(checkIDs, subIDs...)
-			} else {
-				checkIDs = []int64{targetUserID}
-			}
-			var checkPlatform string
-			if !isAll {
-				checkPlatform = targetPlatform
-			}
-			endDateCheck := stats[checkLimit-1].LaunchDate
-			cfgs, _ := s.ltvStatRepo.FindLaunchConfigs(ctx, checkPlatform, checkIDs, startDate, endDateCheck)
-			for _, cfg := range cfgs {
-				if cfg.Spend.GreaterThan(decimal.Zero) {
-					needsRecalculate = true
-					break
-				}
-			}
-		}
-	}
-
-	if needsRecalculate {
+ 
+	if len(stats) == 0 {
 		_ = s.CalculateLtvStatsForUserDirect(ctx, targetPlatform, targetUserID)
 		stats, _ = s.ltvStatRepo.FindStatsByFilter(ctx, targetPlatform, []int64{targetUserID}, startDate, "")
 	}
