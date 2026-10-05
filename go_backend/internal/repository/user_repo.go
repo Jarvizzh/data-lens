@@ -1,0 +1,144 @@
+package repository
+
+import (
+	"context"
+
+	"go_backend/internal/model"
+
+	"gorm.io/gorm"
+)
+
+type UserRepository struct {
+	db *gorm.DB
+}
+
+func NewUserRepository(db *gorm.DB) *UserRepository {
+	return &UserRepository{db: db}
+}
+
+func (r *UserRepository) FindByUsername(ctx context.Context, username string) (*model.SysUser, error) {
+	var user model.SysUser
+	err := r.db.WithContext(ctx).Where("username = ?", username).First(&user).Error
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (r *UserRepository) FindByID(ctx context.Context, id int64) (*model.SysUser, error) {
+	var user model.SysUser
+	err := r.db.WithContext(ctx).Where("id = ?", id).First(&user).Error
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (r *UserRepository) FindAll(ctx context.Context) ([]*model.SysUser, error) {
+	var users []*model.SysUser
+	err := r.db.WithContext(ctx).Order("id asc").Find(&users).Error
+	return users, err
+}
+
+func (r *UserRepository) Create(ctx context.Context, user *model.SysUser) error {
+	return r.db.WithContext(ctx).Create(user).Error
+}
+
+func (r *UserRepository) Update(ctx context.Context, user *model.SysUser) error {
+	return r.db.WithContext(ctx).Save(user).Error
+}
+
+// SubAccount 相关
+func (r *UserRepository) FindSubAccountIDs(ctx context.Context, masterUserID int64) ([]int64, error) {
+	var subIDs []int64
+	err := r.db.WithContext(ctx).Model(&model.UserSubAccount{}).
+		Where("master_user_id = ?", masterUserID).
+		Pluck("sub_user_id", &subIDs).Error
+	return subIDs, err
+}
+
+func (r *UserRepository) BindSubAccount(ctx context.Context, masterUserID, subUserID int64) error {
+	sub := model.UserSubAccount{
+		MasterUserID: masterUserID,
+		SubUserID:    subUserID,
+	}
+	return r.db.WithContext(ctx).Where("master_user_id = ? AND sub_user_id = ?", masterUserID, subUserID).
+		FirstOrCreate(&sub).Error
+}
+
+func (r *UserRepository) UnbindSubAccount(ctx context.Context, masterUserID, subUserID int64) error {
+	return r.db.WithContext(ctx).Where("master_user_id = ? AND sub_user_id = ?", masterUserID, subUserID).
+		Delete(&model.UserSubAccount{}).Error
+}
+
+// ViewPermission 相关
+func (r *UserRepository) FindViewPermissionTargetIDs(ctx context.Context, userID int64) ([]int64, error) {
+	var targetIDs []int64
+	err := r.db.WithContext(ctx).Model(&model.UserViewPermission{}).
+		Where("user_id = ?", userID).
+		Pluck("target_user_id", &targetIDs).Error
+	return targetIDs, err
+}
+
+func (r *UserRepository) ReplaceViewPermissions(ctx context.Context, userID int64, targetIDs []int64) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ?", userID).Delete(&model.UserViewPermission{}).Error; err != nil {
+			return err
+		}
+		if len(targetIDs) == 0 {
+			return nil
+		}
+		perms := make([]model.UserViewPermission, 0, len(targetIDs))
+		for _, tid := range targetIDs {
+			perms = append(perms, model.UserViewPermission{
+				UserID:       userID,
+				TargetUserID: tid,
+			})
+		}
+		return tx.Create(&perms).Error
+	})
+}
+
+// UserLandingPage 相关
+func (r *UserRepository) FindLandingPages(ctx context.Context, platformCode string, userID int64) ([]*model.UserLandingPage, error) {
+	var pages []*model.UserLandingPage
+	q := r.db.WithContext(ctx)
+	if platformCode != "" && platformCode != "ALL" {
+		q = q.Where("platform_code = ?", platformCode)
+	}
+	if userID > 0 {
+		q = q.Where("user_id = ?", userID)
+	}
+	err := q.Find(&pages).Error
+	return pages, err
+}
+
+func (r *UserRepository) ReplaceLandingPages(ctx context.Context, platformCode string, userID int64, landingPageIDs []string) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		delQuery := tx.Where("user_id = ?", userID)
+		if platformCode != "" && platformCode != "ALL" {
+			delQuery = delQuery.Where("platform_code = ?", platformCode)
+		}
+		if err := delQuery.Delete(&model.UserLandingPage{}).Error; err != nil {
+			return err
+		}
+
+		if len(landingPageIDs) == 0 {
+			return nil
+		}
+		plat := platformCode
+		if plat == "" || plat == "ALL" {
+			plat = "rocnovel"
+		}
+		pages := make([]model.UserLandingPage, 0, len(landingPageIDs))
+		for _, lpid := range landingPageIDs {
+			pages = append(pages, model.UserLandingPage{
+				PlatformCode:  plat,
+				UserID:        userID,
+				LandingPageID: lpid,
+				Timezone:      "CST",
+			})
+		}
+		return tx.Create(&pages).Error
+	})
+}
