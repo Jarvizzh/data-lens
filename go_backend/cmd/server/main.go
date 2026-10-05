@@ -72,7 +72,7 @@ func main() {
 	ltvSvc := service.NewLtvService(calculator, ltvStatRepo, orderRepo, userRepo, userSvc, predictSvc, ltvCache, monthlySummarySvc)
 	rechargeSvc := service.NewRechargeStatService(orderRepo, userRepo, userSvc, rechargeDistRepo)
 	dailyDistSvc := service.NewDailyDistributionService(rechargeDistRepo, orderRepo, userRepo, rechargeSvc)
-	syncMgr := service.NewSyncManager(orderRepo, flicknovelRepo, platformRepo, rocnovelClient, flicknovelClient)
+	syncMgr := service.NewSyncManager(orderRepo, flicknovelRepo, platformRepo, rocnovelClient, flicknovelClient, logger)
 	settleSvc := service.NewSettlementService(settleRepo, orderRepo, userRepo, userSvc)
 
 	// 7. 启动定时任务调度器
