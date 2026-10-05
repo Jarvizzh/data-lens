@@ -227,17 +227,8 @@ func (m *SyncManager) SyncRocnovelOrders(ctx context.Context, startTime, endTime
 				}
 				m.logger.Warn("Failed to sync Rocnovel orders for day", zap.String("day", dayStr), zap.Error(err))
 			} else {
-				done := completedDays.Add(1)
-				accum := totalSaved.Add(int64(daySaved))
-				if daySaved > 0 || done%5 == 0 || int(done) == totalDays {
-					m.logger.Info("Rocnovel day sync progress",
-						zap.String("day", dayStr),
-						zap.Int("day_orders", daySaved),
-						zap.Int64("completed_days", done),
-						zap.Int("total_days", totalDays),
-						zap.Int64("accumulated_orders", accum),
-					)
-				}
+				completedDays.Add(1)
+				totalSaved.Add(int64(daySaved))
 			}
 		}(day)
 	}
@@ -423,14 +414,6 @@ func (m *SyncManager) SyncFlicknovelOrders(ctx context.Context, startDate, endDa
 				totalSynced += len(rawOrders)
 			}
 
-			m.logger.Info("Flicknovel order segment progress",
-				zap.String("segment", fmt.Sprintf("%s ~ %s", segStartStr, segEndStr)),
-				zap.Int("page", pageIndex),
-				zap.Int("page_orders", len(rawOrders)),
-				zap.Int64("segment_total", data.TotalCount),
-				zap.Int("total_synced", totalSynced),
-			)
-
 			if int64(pageIndex*pageSize) >= data.TotalCount {
 				break
 			}
@@ -503,12 +486,6 @@ func (m *SyncManager) SyncFlicknovelPromotionsAndTemplates(ctx context.Context) 
 		}
 
 		totalPromotions += len(promotions)
-		m.logger.Info("Flicknovel promotions sync progress",
-			zap.Int("page", pageIndex),
-			zap.Int("page_count", len(promotions)),
-			zap.Int("accumulated", totalPromotions),
-			zap.Int64("total_count", pData.TotalCount),
-		)
 
 		if int64(pageIndex*pageSize) >= pData.TotalCount {
 			break
@@ -614,12 +591,6 @@ func (m *SyncManager) SyncFlicknovelRelations(ctx context.Context, startDate, en
 		}
 
 		totalSynced += len(relations)
-		m.logger.Info("Flicknovel relations sync progress",
-			zap.Int("page", pageIndex),
-			zap.Int("page_count", len(relations)),
-			zap.Int("accumulated", totalSynced),
-			zap.Int64("total_count", data.TotalCount),
-		)
 
 		if int64(pageIndex*pageSize) >= data.TotalCount {
 			break
