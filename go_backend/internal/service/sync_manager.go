@@ -283,7 +283,7 @@ func (m *SyncManager) SyncOrdersAllPlatforms(ctx context.Context, startTime, end
 	return err
 }
 
-// SyncFlicknovelOrders 同步番茄司南订单
+// SyncFlicknovelOrders 同步番茄司南订单 (按 25 天自然区间分段拉取，对齐 Java 架构)
 func (m *SyncManager) SyncFlicknovelOrders(ctx context.Context, startDate, endDate string) (int, error) {
 	if m.fnClient == nil {
 		return 0, fmt.Errorf("flicknovel client not configured")
@@ -301,96 +301,151 @@ func (m *SyncManager) SyncFlicknovelOrders(ctx context.Context, startDate, endDa
 	if len(endStr) >= 10 {
 		endStr = endStr[:10]
 	}
+	todayBj := time.Now().In(timeutil.BeijingZone).Format(timeutil.DateLayout)
 	if endStr == "" {
-		endStr = time.Now().In(timeutil.BeijingZone).Format(timeutil.DateLayout)
+		endStr = todayBj
 	}
 
-	pageIndex := 1
-	pageSize := 100
+	startDateParsed, err := time.ParseInLocation(timeutil.DateLayout, startStr, timeutil.BeijingZone)
+	if err != nil {
+		startDateParsed, _ = time.ParseInLocation(timeutil.DateLayout, "2026-09-16", timeutil.BeijingZone)
+	}
+	endDateParsed, err := time.ParseInLocation(timeutil.DateLayout, endStr, timeutil.BeijingZone)
+	if err != nil {
+		endDateParsed, _ = time.ParseInLocation(timeutil.DateLayout, todayBj, timeutil.BeijingZone)
+	}
+	if startDateParsed.After(endDateParsed) {
+		startDateParsed = endDateParsed
+	}
+
+	m.logger.Info("Starting Flicknovel order sync",
+		zap.String("platform", "flicknovel"),
+		zap.String("start_time", startStr),
+		zap.String("end_time", endStr),
+	)
+
+	startSyncTime := time.Now()
 	totalSynced := 0
 
-	for {
-		data, err := m.fnClient.QueryOrders(ctx, flicknovel.OrderQueryRequest{
-			StartTime: startStr,
-			EndTime:   endStr,
-			PageIndex: pageIndex,
-			PageSize:  pageSize,
-		})
-		if err != nil {
-			return totalSynced, fmt.Errorf("query flicknovel orders page %d failed: %w", pageIndex, err)
+	// 25 天分段拉取，避免大时间跨度查询被三方网关限流或超时
+	currStart := startDateParsed
+	for !currStart.After(endDateParsed) {
+		currEnd := currStart.AddDate(0, 0, 24)
+		if currEnd.After(endDateParsed) {
+			currEnd = endDateParsed
 		}
 
-		if len(data.Orders) == 0 {
-			break
+		segStartStr := currStart.Format(timeutil.DateLayout)
+		segEndStr := currEnd.Format(timeutil.DateLayout)
+
+		pageIndex := 1
+		pageSize := 200
+
+		for {
+			data, err := m.fnClient.QueryOrders(ctx, flicknovel.OrderQueryRequest{
+				StartTime: segStartStr,
+				EndTime:   segEndStr,
+				PageIndex: pageIndex,
+				PageSize:  pageSize,
+			})
+			if err != nil {
+				m.logger.Error("Failed to query Flicknovel orders",
+					zap.String("segment", fmt.Sprintf("%s ~ %s", segStartStr, segEndStr)),
+					zap.Int("page", pageIndex),
+					zap.Error(err),
+				)
+				return totalSynced, fmt.Errorf("query flicknovel orders [%s ~ %s] page %d failed: %w", segStartStr, segEndStr, pageIndex, err)
+			}
+
+			if len(data.Orders) == 0 {
+				break
+			}
+
+			rawOrders := make([]*model.RawOrder, 0, len(data.Orders))
+			for _, rec := range data.Orders {
+				orderID := strings.TrimSpace(rec.OrderID)
+				if orderID == "" {
+					continue
+				}
+
+				regStr := strings.TrimSpace(rec.RegisterTime)
+				payStr := strings.TrimSpace(rec.PayTime)
+				if regStr == "" || payStr == "" {
+					continue
+				}
+
+				regBj, err1 := time.ParseInLocation(timeutil.DateTimeLayout, regStr, timeutil.BeijingZone)
+				payBj, err2 := time.ParseInLocation(timeutil.DateTimeLayout, payStr, timeutil.BeijingZone)
+				if err1 != nil || err2 != nil || regBj.IsZero() || payBj.IsZero() {
+					continue
+				}
+
+				regEt := regBj.In(timeutil.EasternZone)
+				regUtc := regBj.UTC()
+				payEt := payBj.In(timeutil.EasternZone)
+				payUtc := payBj.UTC()
+
+				amtUsd, _ := decimal.NewFromString(rec.OrderAmountUSD)
+				if amtUsd.IsZero() && rec.OrderAmountCent > 0 {
+					amtUsd = decimal.NewFromInt(int64(rec.OrderAmountCent)).Div(decimal.NewFromInt(100))
+				}
+
+				order := &model.RawOrder{
+					PlatformCode:    "flicknovel",
+					OrderID:         orderID,
+					MemberID:        strings.TrimSpace(rec.UserID),
+					LandingPageID:   strings.TrimSpace(rec.PromotionID),
+					RegisterTimeBJ:  regBj,
+					RegisterTimeET:  regEt,
+					RegisterDateET:  regEt.Format(timeutil.DateLayout),
+					RegisterTimeUTC: &regUtc,
+					RegisterDateUTC: regUtc.Format(timeutil.DateLayout),
+					PayTimeBJ:       payBj,
+					PayTimeET:       payEt,
+					PayDateET:       payEt.Format(timeutil.DateLayout),
+					PayTimeUTC:      &payUtc,
+					PayDateUTC:      payUtc.Format(timeutil.DateLayout),
+					OrderAmountCent: rec.OrderAmountCent,
+					OrderAmountUSD:  amtUsd,
+					IsSubs:          rec.IsSubs,
+					RenewType:       rec.RenewType,
+					PayState:        rec.PayState,
+					RefundStatus:    rec.RefundStatus,
+					CreatedAt:       time.Now(),
+				}
+				rawOrders = append(rawOrders, order)
+			}
+
+			if len(rawOrders) > 0 {
+				if err := m.orderRepo.BatchUpsert(ctx, rawOrders); err != nil {
+					return totalSynced, fmt.Errorf("upsert flicknovel orders failed: %w", err)
+				}
+				totalSynced += len(rawOrders)
+			}
+
+			m.logger.Info("Flicknovel order segment progress",
+				zap.String("segment", fmt.Sprintf("%s ~ %s", segStartStr, segEndStr)),
+				zap.Int("page", pageIndex),
+				zap.Int("page_orders", len(rawOrders)),
+				zap.Int64("segment_total", data.TotalCount),
+				zap.Int("total_synced", totalSynced),
+			)
+
+			if int64(pageIndex*pageSize) >= data.TotalCount {
+				break
+			}
+			pageIndex++
 		}
 
-		rawOrders := make([]*model.RawOrder, 0, len(data.Orders))
-		for _, rec := range data.Orders {
-			orderID := strings.TrimSpace(rec.OrderID)
-			if orderID == "" {
-				continue
-			}
-
-			regStr := strings.TrimSpace(rec.RegisterTime)
-			payStr := strings.TrimSpace(rec.PayTime)
-			if regStr == "" || payStr == "" {
-				continue
-			}
-
-			regBj, err1 := time.ParseInLocation(timeutil.DateTimeLayout, regStr, timeutil.BeijingZone)
-			payBj, err2 := time.ParseInLocation(timeutil.DateTimeLayout, payStr, timeutil.BeijingZone)
-			if err1 != nil || err2 != nil || regBj.IsZero() || payBj.IsZero() {
-				continue
-			}
-
-			regEt := regBj.In(timeutil.EasternZone)
-			regUtc := regBj.UTC()
-			payEt := payBj.In(timeutil.EasternZone)
-			payUtc := payBj.UTC()
-
-			amtUsd, _ := decimal.NewFromString(rec.OrderAmountUSD)
-			if amtUsd.IsZero() && rec.OrderAmountCent > 0 {
-				amtUsd = decimal.NewFromInt(int64(rec.OrderAmountCent)).Div(decimal.NewFromInt(100))
-			}
-
-			order := &model.RawOrder{
-				PlatformCode:    "flicknovel",
-				OrderID:         orderID,
-				MemberID:        strings.TrimSpace(rec.UserID),
-				LandingPageID:   strings.TrimSpace(rec.PromotionID),
-				RegisterTimeBJ:  regBj,
-				RegisterTimeET:  regEt,
-				RegisterDateET:  regEt.Format(timeutil.DateLayout),
-				RegisterTimeUTC: &regUtc,
-				RegisterDateUTC: regUtc.Format(timeutil.DateLayout),
-				PayTimeBJ:       payBj,
-				PayTimeET:       payEt,
-				PayDateET:       payEt.Format(timeutil.DateLayout),
-				PayTimeUTC:      &payUtc,
-				PayDateUTC:      payUtc.Format(timeutil.DateLayout),
-				OrderAmountCent: rec.OrderAmountCent,
-				OrderAmountUSD:  amtUsd,
-				IsSubs:          rec.IsSubs,
-				RenewType:       rec.RenewType,
-				PayState:        rec.PayState,
-				RefundStatus:    rec.RefundStatus,
-				CreatedAt:       time.Now(),
-			}
-			rawOrders = append(rawOrders, order)
-		}
-
-		if len(rawOrders) > 0 {
-			if err := m.orderRepo.BatchUpsert(ctx, rawOrders); err != nil {
-				return totalSynced, fmt.Errorf("upsert flicknovel orders failed: %w", err)
-			}
-			totalSynced += len(rawOrders)
-		}
-
-		if int64(pageIndex*pageSize) >= data.TotalCount {
-			break
-		}
-		pageIndex++
+		currStart = currEnd.AddDate(0, 0, 1)
 	}
+
+	m.logger.Info("Finished Flicknovel order sync",
+		zap.String("platform", "flicknovel"),
+		zap.String("range", fmt.Sprintf("%s ~ %s", startStr, endStr)),
+		zap.Int("total_saved_orders", totalSynced),
+		zap.Duration("duration", time.Since(startSyncTime)),
+	)
 
 	return totalSynced, nil
 }
@@ -400,9 +455,12 @@ func (m *SyncManager) SyncFlicknovelPromotionsAndTemplates(ctx context.Context) 
 	if m.fnClient == nil {
 		return fmt.Errorf("flicknovel client not configured")
 	}
+	m.logger.Info("Starting Flicknovel promotions and templates sync")
+	startTime := time.Now()
 	pageIndex := 1
 	pageSize := 50
 	distAppIDs := make(map[int64]bool)
+	totalPromotions := 0
 
 	for {
 		pData, err := m.fnClient.QueryPromotions(ctx, flicknovel.PromotionQueryRequest{
@@ -444,6 +502,14 @@ func (m *SyncManager) SyncFlicknovelPromotionsAndTemplates(ctx context.Context) 
 			return fmt.Errorf("upsert flicknovel promotions failed: %w", err)
 		}
 
+		totalPromotions += len(promotions)
+		m.logger.Info("Flicknovel promotions sync progress",
+			zap.Int("page", pageIndex),
+			zap.Int("page_count", len(promotions)),
+			zap.Int("accumulated", totalPromotions),
+			zap.Int64("total_count", pData.TotalCount),
+		)
+
 		if int64(pageIndex*pageSize) >= pData.TotalCount {
 			break
 		}
@@ -451,6 +517,7 @@ func (m *SyncManager) SyncFlicknovelPromotionsAndTemplates(ctx context.Context) 
 	}
 
 	// 遍历 distAppIDs 拉取充值模板
+	totalTemplates := 0
 	for distAppID := range distAppIDs {
 		tData, err := m.fnClient.QueryRechargeTemplates(ctx, flicknovel.RechargeTemplateQueryRequest{
 			DistAppID: distAppID,
@@ -470,8 +537,15 @@ func (m *SyncManager) SyncFlicknovelPromotionsAndTemplates(ctx context.Context) 
 				})
 			}
 			_ = m.flicknovelRepo.BatchUpsertTemplates(ctx, templates)
+			totalTemplates += len(templates)
 		}
 	}
+
+	m.logger.Info("Finished Flicknovel promotions and templates sync",
+		zap.Int("total_promotions", totalPromotions),
+		zap.Int("total_templates", totalTemplates),
+		zap.Duration("duration", time.Since(startTime)),
+	)
 
 	return nil
 }
@@ -481,6 +555,8 @@ func (m *SyncManager) SyncFlicknovelRelations(ctx context.Context, startDate, en
 	if m.fnClient == nil {
 		return 0, fmt.Errorf("flicknovel client not configured")
 	}
+	m.logger.Info("Starting Flicknovel relations sync", zap.String("start_date", startDate), zap.String("end_date", endDate))
+	startTime := time.Now()
 	pageIndex := 1
 	pageSize := 200
 	totalSynced := 0
@@ -538,11 +614,23 @@ func (m *SyncManager) SyncFlicknovelRelations(ctx context.Context, startDate, en
 		}
 
 		totalSynced += len(relations)
+		m.logger.Info("Flicknovel relations sync progress",
+			zap.Int("page", pageIndex),
+			zap.Int("page_count", len(relations)),
+			zap.Int("accumulated", totalSynced),
+			zap.Int64("total_count", data.TotalCount),
+		)
+
 		if int64(pageIndex*pageSize) >= data.TotalCount {
 			break
 		}
 		pageIndex++
 	}
+
+	m.logger.Info("Finished Flicknovel relations sync",
+		zap.Int("total_saved_relations", totalSynced),
+		zap.Duration("duration", time.Since(startTime)),
+	)
 
 	return totalSynced, nil
 }
