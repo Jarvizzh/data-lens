@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 
 	"go_backend/internal/model"
 
@@ -33,7 +34,25 @@ func (r *LtvStatRepository) BatchUpsertLtvDailyStat(ctx context.Context, stats [
 	}).CreateInBatches(stats, 100).Error
 }
 
-// FindStatsByFilter 多条件查询 LtvDailyStat
+// DeleteAndBatchInsert 原子删除指定平台和用户的数据并批量插入新数据
+func (r *LtvStatRepository) DeleteAndBatchInsert(ctx context.Context, platformCode string, userID int64, stats []*model.LtvDailyStat) error {
+	targetPlatform := "ALL"
+	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
+		targetPlatform = strings.ToLower(platformCode)
+	}
+
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("platform_code = ? AND user_id = ?", targetPlatform, userID).Delete(&model.LtvDailyStat{}).Error; err != nil {
+			return err
+		}
+		if len(stats) == 0 {
+			return nil
+		}
+		return tx.CreateInBatches(stats, 100).Error
+	})
+}
+
+// FindStatsByFilter 多条件查询 LtvDailyStat (按日期正序)
 func (r *LtvStatRepository) FindStatsByFilter(
 	ctx context.Context,
 	platformCode string,
@@ -43,9 +62,12 @@ func (r *LtvStatRepository) FindStatsByFilter(
 	var stats []*model.LtvDailyStat
 	q := r.db.WithContext(ctx)
 
-	if platformCode != "" && platformCode != "ALL" {
-		q = q.Where("platform_code = ?", platformCode)
+	targetPlatform := "ALL"
+	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
+		targetPlatform = strings.ToLower(platformCode)
 	}
+	q = q.Where("platform_code = ?", targetPlatform)
+
 	if len(userIDs) > 0 {
 		q = q.Where("user_id IN ?", userIDs)
 	}
@@ -56,7 +78,14 @@ func (r *LtvStatRepository) FindStatsByFilter(
 		q = q.Where("launch_date <= ?", endDate)
 	}
 
-	err := q.Order("launch_date desc, user_id asc").Find(&stats).Error
+	err := q.Order("launch_date asc, user_id asc").Find(&stats).Error
+	if err == nil {
+		for _, s := range stats {
+			if len(s.LaunchDate) >= 10 {
+				s.LaunchDate = s.LaunchDate[:10]
+			}
+		}
+	}
 	return stats, err
 }
 
@@ -82,8 +111,8 @@ func (r *LtvStatRepository) FindLaunchConfigs(
 	var configs []*model.LtvLaunchConfig
 	q := r.db.WithContext(ctx)
 
-	if platformCode != "" && platformCode != "ALL" {
-		q = q.Where("platform_code = ?", platformCode)
+	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
+		q = q.Where("platform_code = ?", strings.ToLower(platformCode))
 	}
 	if len(userIDs) > 0 {
 		q = q.Where("user_id IN ?", userIDs)
@@ -95,6 +124,13 @@ func (r *LtvStatRepository) FindLaunchConfigs(
 		q = q.Where("launch_date <= ?", endDate)
 	}
 
-	err := q.Find(&configs).Error
+	err := q.Order("launch_date asc, user_id asc").Find(&configs).Error
+	if err == nil {
+		for _, c := range configs {
+			if len(c.LaunchDate) >= 10 {
+				c.LaunchDate = c.LaunchDate[:10]
+			}
+		}
+	}
 	return configs, err
 }

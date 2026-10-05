@@ -92,13 +92,14 @@ func (c *LtvCalculator) CalculateSingleCohort(
 	}
 
 	// 2. 7日与15日留存
-	day8Date := launchDate.AddDate(0, 0, 7)
-	if !day8Date.After(maxToday) {
+	day8DateStr := launchDate.AddDate(0, 0, 7).Format(timeutil.DateLayout)
+	maxTodayStr := maxToday.Format(timeutil.DateLayout)
+	if day8DateStr <= maxTodayStr {
 		retained7 := make(map[string]struct{})
 		for _, o := range cohortOrders {
 			if _, ok := subMembersMap[o.MemberID]; ok {
-				payDate := c.getEffectivePayDate(o, tzMap)
-				if !payDate.IsZero() && int(payDate.Sub(launchDate).Hours()/24) >= 7 {
+				payDateStr := GetEffectivePayDate(o, tzMap)
+				if payDateStr != "" && payDateStr >= day8DateStr {
 					retained7[o.MemberID] = struct{}{}
 				}
 			}
@@ -111,13 +112,13 @@ func (c *LtvCalculator) CalculateSingleCohort(
 		}
 	}
 
-	day16Date := launchDate.AddDate(0, 0, 15)
-	if !day16Date.After(maxToday) {
+	day16DateStr := launchDate.AddDate(0, 0, 15).Format(timeutil.DateLayout)
+	if day16DateStr <= maxTodayStr {
 		retained15 := make(map[string]struct{})
 		for _, o := range cohortOrders {
 			if _, ok := subMembersMap[o.MemberID]; ok {
-				payDate := c.getEffectivePayDate(o, tzMap)
-				if !payDate.IsZero() && int(payDate.Sub(launchDate).Hours()/24) >= 15 {
+				payDateStr := GetEffectivePayDate(o, tzMap)
+				if payDateStr != "" && payDateStr >= day16DateStr {
 					retained15[o.MemberID] = struct{}{}
 				}
 			}
@@ -132,15 +133,15 @@ func (c *LtvCalculator) CalculateSingleCohort(
 
 	// 3. Day 1 ~ Day 60 充值与 ROI 计算
 	for day := 1; day <= 60; day++ {
-		targetDate := launchDate.AddDate(0, 0, day-1)
-		if targetDate.After(maxToday) {
+		targetDateStr := launchDate.AddDate(0, 0, day-1).Format(timeutil.DateLayout)
+		if targetDateStr > maxTodayStr {
 			break
 		}
 
 		dayCumRecharge := decimal.Zero
 		for _, o := range cohortOrders {
-			payDate := c.getEffectivePayDate(o, tzMap)
-			if !payDate.IsZero() && !payDate.After(targetDate) {
+			payDateStr := GetEffectivePayDate(o, tzMap)
+			if payDateStr != "" && payDateStr <= targetDateStr {
 				dayCumRecharge = dayCumRecharge.Add(o.OrderAmountUSD)
 			}
 		}
@@ -165,30 +166,6 @@ func (c *LtvCalculator) CalculateSingleCohort(
 	return stat
 }
 
-func (c *LtvCalculator) getEffectivePayDate(o *model.RawOrder, tzMap map[string]string) time.Time {
-	tz := "CST"
-	if tzMap != nil && o.LandingPageID != "" {
-		if t, ok := tzMap[o.LandingPageID]; ok {
-			tz = t
-		}
-	}
-
-	if strings.EqualFold(tz, "ET") {
-		if o.PayDateET != "" {
-			t, err := time.ParseInLocation(timeutil.DateLayout, o.PayDateET, timeutil.EasternZone)
-			if err == nil {
-				return t
-			}
-		}
-		return o.PayTimeET
-	}
-
-	// 默认 CST
-	bjDate := o.PayTimeBJ.In(timeutil.BeijingZone).Format(timeutil.DateLayout)
-	t, _ := time.ParseInLocation(timeutil.DateLayout, bjDate, timeutil.BeijingZone)
-	return t
-}
-
 func (c *LtvCalculator) GetLaunchStartDateForPlatform(platformCode string) string {
 	switch strings.ToLower(platformCode) {
 	case "flicknovel":
@@ -198,4 +175,104 @@ func (c *LtvCalculator) GetLaunchStartDateForPlatform(platformCode string) strin
 	default:
 		return "2026-07-10"
 	}
+}
+
+// GetEffectiveRegisterDate 提取订单的生效注册日期 (按落地页 ID 区分 UTC、美东与北京时间)
+func GetEffectiveRegisterDate(o *model.RawOrder, tzMap map[string]string) string {
+	if o == nil {
+		return ""
+	}
+	pid := strings.TrimSpace(o.LandingPageID)
+	defaultTz := "CST"
+	if strings.EqualFold(o.PlatformCode, "flicknovel") {
+		defaultTz = "UTC"
+	}
+	tz := defaultTz
+	if tzMap != nil && pid != "" {
+		if t, ok := tzMap[pid]; ok && strings.TrimSpace(t) != "" {
+			tz = strings.ToUpper(strings.TrimSpace(t))
+		}
+	}
+	if tz == "" || tz == "BJ" {
+		tz = "CST"
+	}
+
+	if tz == "UTC" {
+		if o.RegisterDateUTC != "" {
+			return o.RegisterDateUTC
+		}
+		if o.RegisterTimeUTC != nil && !o.RegisterTimeUTC.IsZero() {
+			return o.RegisterTimeUTC.UTC().Format(timeutil.DateLayout)
+		}
+		if !o.RegisterTimeBJ.IsZero() {
+			return o.RegisterTimeBJ.Add(-8 * time.Hour).Format(timeutil.DateLayout)
+		}
+		return o.RegisterDateET
+	}
+
+	if tz == "ET" {
+		if o.RegisterDateET != "" {
+			return o.RegisterDateET
+		}
+		if !o.RegisterTimeET.IsZero() {
+			return o.RegisterTimeET.In(timeutil.EasternZone).Format(timeutil.DateLayout)
+		}
+		return ""
+	}
+
+	// 默认 CST / BJ
+	if !o.RegisterTimeBJ.IsZero() {
+		return o.RegisterTimeBJ.In(timeutil.BeijingZone).Format(timeutil.DateLayout)
+	}
+	return o.RegisterDateET
+}
+
+// GetEffectivePayDate 提取订单的生效支付日期 (按落地页 ID 区分 UTC、美东与北京时间)
+func GetEffectivePayDate(o *model.RawOrder, tzMap map[string]string) string {
+	if o == nil {
+		return ""
+	}
+	pid := strings.TrimSpace(o.LandingPageID)
+	defaultTz := "CST"
+	if strings.EqualFold(o.PlatformCode, "flicknovel") {
+		defaultTz = "UTC"
+	}
+	tz := defaultTz
+	if tzMap != nil && pid != "" {
+		if t, ok := tzMap[pid]; ok && strings.TrimSpace(t) != "" {
+			tz = strings.ToUpper(strings.TrimSpace(t))
+		}
+	}
+	if tz == "" || tz == "BJ" {
+		tz = "CST"
+	}
+
+	if tz == "UTC" {
+		if o.PayDateUTC != "" {
+			return o.PayDateUTC
+		}
+		if o.PayTimeUTC != nil && !o.PayTimeUTC.IsZero() {
+			return o.PayTimeUTC.UTC().Format(timeutil.DateLayout)
+		}
+		if !o.PayTimeBJ.IsZero() {
+			return o.PayTimeBJ.Add(-8 * time.Hour).Format(timeutil.DateLayout)
+		}
+		return o.PayDateET
+	}
+
+	if tz == "ET" {
+		if o.PayDateET != "" {
+			return o.PayDateET
+		}
+		if !o.PayTimeET.IsZero() {
+			return o.PayTimeET.In(timeutil.EasternZone).Format(timeutil.DateLayout)
+		}
+		return ""
+	}
+
+	// 默认 CST / BJ
+	if !o.PayTimeBJ.IsZero() {
+		return o.PayTimeBJ.In(timeutil.BeijingZone).Format(timeutil.DateLayout)
+	}
+	return o.PayDateET
 }

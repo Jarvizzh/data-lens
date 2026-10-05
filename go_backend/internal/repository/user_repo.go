@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 
 	"go_backend/internal/model"
 
@@ -59,6 +60,14 @@ func (r *UserRepository) FindSubAccountIDs(ctx context.Context, masterUserID int
 		Where("master_user_id = ?", masterUserID).
 		Pluck("sub_user_id", &subIDs).Error
 	return subIDs, err
+}
+
+func (r *UserRepository) FindMasterUserIDs(ctx context.Context, subUserID int64) ([]int64, error) {
+	var masterIDs []int64
+	err := r.db.WithContext(ctx).Model(&model.UserSubAccount{}).
+		Where("sub_user_id = ?", subUserID).
+		Pluck("master_user_id", &masterIDs).Error
+	return masterIDs, err
 }
 
 func (r *UserRepository) ReplaceMasterSubAccounts(ctx context.Context, masterUserID int64, subUserIDs []int64) error {
@@ -137,8 +146,8 @@ func (r *UserRepository) ExistsViewPermission(ctx context.Context, userID, targe
 func (r *UserRepository) FindLandingPages(ctx context.Context, platformCode string, userID int64) ([]*model.UserLandingPage, error) {
 	var pages []*model.UserLandingPage
 	q := r.db.WithContext(ctx)
-	if platformCode != "" && platformCode != "ALL" {
-		q = q.Where("platform_code = ?", platformCode)
+	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
+		q = q.Where("platform_code = ?", strings.ToLower(platformCode))
 	}
 	if userID > 0 {
 		q = q.Where("user_id = ?", userID)
@@ -150,8 +159,8 @@ func (r *UserRepository) FindLandingPages(ctx context.Context, platformCode stri
 func (r *UserRepository) ReplaceLandingPages(ctx context.Context, platformCode string, userID int64, landingPageIDs []string) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		delQuery := tx.Where("user_id = ?", userID)
-		if platformCode != "" && platformCode != "ALL" {
-			delQuery = delQuery.Where("platform_code = ?", platformCode)
+		if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
+			delQuery = delQuery.Where("platform_code = ?", strings.ToLower(platformCode))
 		}
 		if err := delQuery.Delete(&model.UserLandingPage{}).Error; err != nil {
 			return err
@@ -160,8 +169,8 @@ func (r *UserRepository) ReplaceLandingPages(ctx context.Context, platformCode s
 		if len(landingPageIDs) == 0 {
 			return nil
 		}
-		plat := platformCode
-		if plat == "" || plat == "ALL" {
+		plat := strings.ToLower(platformCode)
+		if plat == "" || plat == "all" {
 			plat = "rocnovel"
 		}
 		pages := make([]model.UserLandingPage, 0, len(landingPageIDs))
@@ -180,8 +189,8 @@ func (r *UserRepository) ReplaceLandingPages(ctx context.Context, platformCode s
 func (r *UserRepository) ReplaceLandingPageConfigs(ctx context.Context, platformCode string, userID int64, pages []*model.UserLandingPage) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		delQuery := tx.Where("user_id = ?", userID)
-		if platformCode != "" && platformCode != "ALL" {
-			delQuery = delQuery.Where("platform_code = ?", platformCode)
+		if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
+			delQuery = delQuery.Where("platform_code = ?", strings.ToLower(platformCode))
 		}
 		if err := delQuery.Delete(&model.UserLandingPage{}).Error; err != nil {
 			return err
@@ -191,4 +200,27 @@ func (r *UserRepository) ReplaceLandingPageConfigs(ctx context.Context, platform
 		}
 		return tx.Create(&pages).Error
 	})
+}
+
+// FindAdminLandingPageIDs 查询所有管理员/超管已配置的落地页ID（用于普通用户隔离）
+func (r *UserRepository) FindAdminLandingPageIDs(ctx context.Context, excludeUserID int64) ([]string, error) {
+	var adminIDs []int64
+	q := r.db.WithContext(ctx).Model(&model.SysUser{}).
+		Where("role IN ('ADMIN', 'SUPER_ADMIN') AND status = 1")
+	if excludeUserID > 0 {
+		q = q.Where("id != ?", excludeUserID)
+	}
+	if err := q.Pluck("id", &adminIDs).Error; err != nil {
+		return nil, err
+	}
+	if len(adminIDs) == 0 {
+		return nil, nil
+	}
+
+	var pids []string
+	err := r.db.WithContext(ctx).Model(&model.UserLandingPage{}).
+		Where("user_id IN ? AND landing_page_id != '__EMPTY__'", adminIDs).
+		Distinct().
+		Pluck("landing_page_id", &pids).Error
+	return pids, err
 }

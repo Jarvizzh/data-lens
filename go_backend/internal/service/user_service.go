@@ -137,21 +137,109 @@ func (s *UserService) DeleteUser(ctx context.Context, userID int64) error {
 }
 
 func (s *UserService) GetLandingPageConfigs(ctx context.Context, platformCode string, userID int64) ([]dto.LandingPageConfigItem, []string, error) {
-	pCode := strings.ToLower(platformCode)
+	if userID <= 0 {
+		return nil, nil, nil
+	}
+	user, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil || user == nil {
+		return nil, nil, err
+	}
+
+	pCode := strings.ToLower(strings.TrimSpace(platformCode))
 	if pCode == "" {
 		pCode = "all"
 	}
+
+	// 1. 若为主账号，自动聚合所有子账号配置的落地页（去重）
+	if user.IsMaster == 1 {
+		subUserIDs, err := s.userRepo.FindSubAccountIDs(ctx, userID)
+		if err != nil {
+			return nil, nil, err
+		}
+		uniquePids := make(map[string]bool)
+		var aggregated []dto.LandingPageConfigItem
+		var aggregatedIDs []string
+		for _, subID := range subUserIDs {
+			subConfigs, _, err := s.GetLandingPageConfigs(ctx, platformCode, subID)
+			if err != nil {
+				continue
+			}
+			for _, item := range subConfigs {
+				pid := strings.TrimSpace(item.LandingPageID)
+				if pid != "" && !strings.EqualFold(pid, "__EMPTY__") {
+					if !uniquePids[pid] {
+						uniquePids[pid] = true
+						aggregated = append(aggregated, item)
+						aggregatedIDs = append(aggregatedIDs, pid)
+					}
+				}
+			}
+		}
+		return aggregated, aggregatedIDs, nil
+	}
+
+	// 2. 普通账号或管理员账号
 	pages, err := s.userRepo.FindLandingPages(ctx, pCode, userID)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	items := make([]dto.LandingPageConfigItem, 0, len(pages))
-	ids := make([]string, 0, len(pages))
-	for _, p := range pages {
-		if p.LandingPageID == "__EMPTY__" {
-			continue
+	isAdmin := strings.EqualFold(user.Role, "ADMIN") || strings.EqualFold(user.Role, "SUPER_ADMIN")
+
+	// 番茄司南 (flicknovel) 初始配置特殊处理：
+	// 仅管理员初始落地页默认填充系统已知的所有推广ID（时区默认 UTC）；普通用户初始默认为空
+	if strings.EqualFold(pCode, "flicknovel") && len(pages) == 0 {
+		if isAdmin {
+			allPids, _ := s.GetAllPlatformLandingPageIds(ctx, "flicknovel")
+			if len(allPids) > 0 {
+				items := make([]dto.LandingPageConfigItem, 0, len(allPids))
+				ids := make([]string, 0, len(allPids))
+				for _, pid := range allPids {
+					clean := strings.TrimSpace(pid)
+					if clean != "" && !strings.EqualFold(clean, "__EMPTY__") {
+						items = append(items, dto.LandingPageConfigItem{
+							PlatformCode:  "flicknovel",
+							LandingPageID: clean,
+							Timezone:      "UTC",
+						})
+						ids = append(ids, clean)
+					}
+				}
+				return items, ids, nil
+			}
+		} else {
+			return nil, nil, nil
 		}
+	}
+
+	// 过滤掉用于标记已主动清空的占位记录 __EMPTY__
+	filtered := make([]*model.UserLandingPage, 0, len(pages))
+	for _, p := range pages {
+		clean := strings.TrimSpace(p.LandingPageID)
+		if clean != "" && !strings.EqualFold(clean, "__EMPTY__") {
+			filtered = append(filtered, p)
+		}
+	}
+
+	// 如果是普通用户 (USER)，剔除已被管理员配置的隔离落地页 ID
+	if strings.EqualFold(user.Role, "USER") {
+		adminPids, _ := s.userRepo.FindAdminLandingPageIDs(ctx, userID)
+		adminPidSet := make(map[string]bool, len(adminPids))
+		for _, apid := range adminPids {
+			adminPidSet[strings.TrimSpace(apid)] = true
+		}
+		nonAdmin := make([]*model.UserLandingPage, 0, len(filtered))
+		for _, p := range filtered {
+			if !adminPidSet[strings.TrimSpace(p.LandingPageID)] {
+				nonAdmin = append(nonAdmin, p)
+			}
+		}
+		filtered = nonAdmin
+	}
+
+	items := make([]dto.LandingPageConfigItem, 0, len(filtered))
+	ids := make([]string, 0, len(filtered))
+	for _, p := range filtered {
 		items = append(items, dto.LandingPageConfigItem{
 			PlatformCode:  p.PlatformCode,
 			LandingPageID: p.LandingPageID,
@@ -163,6 +251,29 @@ func (s *UserService) GetLandingPageConfigs(ctx context.Context, platformCode st
 }
 
 func (s *UserService) UpdateLandingPageConfigs(ctx context.Context, platformCode string, userID int64, items []dto.LandingPageConfigItem) error {
+	user, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil || user == nil {
+		return errors.New("用户不存在")
+	}
+	if user.IsMaster == 1 {
+		return errors.New("主账号为数据汇总账号，落地页由关联子账号自动聚合，不可直接编辑！")
+	}
+
+	// 如果是普通用户 (USER)，拦截校验：不允许配置已被管理员配置的独占隔离落地页
+	if strings.EqualFold(user.Role, "USER") {
+		adminPids, _ := s.userRepo.FindAdminLandingPageIDs(ctx, userID)
+		adminPidSet := make(map[string]bool, len(adminPids))
+		for _, apid := range adminPids {
+			adminPidSet[strings.TrimSpace(apid)] = true
+		}
+		for _, item := range items {
+			pid := strings.TrimSpace(item.LandingPageID)
+			if adminPidSet[pid] {
+				return fmt.Errorf("落地页 ID [%s] 为管理员独占/隔离落地页，普通用户无法配置！", pid)
+			}
+		}
+	}
+
 	pCode := strings.ToLower(platformCode)
 	if pCode == "" || pCode == "all" {
 		pCode = "rocnovel"

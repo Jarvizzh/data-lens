@@ -15,57 +15,59 @@ import (
 type RechargeStatService struct {
 	orderRepo        *repository.OrderRepository
 	userRepo         *repository.UserRepository
+	userSvc          *UserService
 	rechargeDistRepo *repository.RechargeDistributionRepository
 }
 
 func NewRechargeStatService(
 	orderRepo *repository.OrderRepository,
 	userRepo *repository.UserRepository,
+	userSvc *UserService,
 	rechargeDistRepo *repository.RechargeDistributionRepository,
 ) *RechargeStatService {
 	return &RechargeStatService{
 		orderRepo:        orderRepo,
 		userRepo:         userRepo,
+		userSvc:          userSvc,
 		rechargeDistRepo: rechargeDistRepo,
 	}
 }
 
 // CalculateDailyDistributionForUser 统计指定用户的每日充值分布
 func (s *RechargeStatService) CalculateDailyDistributionForUser(ctx context.Context, platformCode string, userID int64) error {
-	pCode := strings.ToLower(platformCode)
-	if pCode == "" {
-		pCode = "all"
+	pCode := strings.ToLower(strings.TrimSpace(platformCode))
+	isAll := pCode == "" || pCode == "all"
+	targetPlatform := "ALL"
+	if !isAll {
+		targetPlatform = pCode
 	}
 
-	landingPages, err := s.userRepo.FindLandingPages(ctx, pCode, userID)
+	userPages, lpIDs, err := s.userSvc.GetLandingPageConfigs(ctx, targetPlatform, userID)
 	if err != nil {
 		return err
 	}
-	lpIDs := make([]string, 0, len(landingPages))
-	tzMap := make(map[string]string)
-	for _, lp := range landingPages {
-		lpIDs = append(lpIDs, lp.LandingPageID)
+	tzMap := make(map[string]string, len(userPages))
+	for _, lp := range userPages {
 		tzMap[lp.LandingPageID] = lp.Timezone
 	}
 
 	startDate := "2026-07-10"
-	if pCode == "flicknovel" {
+	if strings.EqualFold(targetPlatform, "flicknovel") {
 		startDate = "2026-09-16"
 	}
 
-	orders, err := s.orderRepo.FindOrdersForLtvCalculation(ctx, pCode, lpIDs, startDate, "")
-	if err != nil {
-		return err
+	var orders []*model.RawOrder
+	if len(lpIDs) > 0 {
+		orders, err = s.orderRepo.FindOrdersForLtvCalculation(ctx, targetPlatform, lpIDs, startDate, "")
+		if err != nil {
+			return err
+		}
 	}
 
 	// 按支付自然日分组订单
 	payDateMap := make(map[string][]*model.RawOrder)
 	for _, o := range orders {
-		payDate := o.PayDateET
-		tz := tzMap[o.LandingPageID]
-		if strings.EqualFold(tz, "CST") {
-			payDate = o.PayTimeBJ.In(timeutil.BeijingZone).Format(timeutil.DateLayout)
-		}
+		payDate := GetEffectivePayDate(o, tzMap)
 		if payDate >= startDate {
 			payDateMap[payDate] = append(payDateMap[payDate], o)
 		}
@@ -80,7 +82,7 @@ func (s *RechargeStatService) CalculateDailyDistributionForUser(ctx context.Cont
 		dateStr := startDateTime.AddDate(0, 0, i).Format(timeutil.DateLayout)
 		dayOrders := payDateMap[dateStr]
 
-		dist := s.calculateSingleDayDistribution(pCode, userID, dateStr, dayOrders, tzMap)
+		dist := s.calculateSingleDayDistribution(targetPlatform, userID, dateStr, dayOrders, tzMap)
 		distList = append(distList, dist)
 	}
 
@@ -132,11 +134,7 @@ func (s *RechargeStatService) calculateSingleDayDistribution(
 		}
 
 		// 判断新老用户 (注册日期与支付日期对比)
-		regDate := o.RegisterDateET
-		tz := tzMap[o.LandingPageID]
-		if strings.EqualFold(tz, "CST") {
-			regDate = o.RegisterTimeBJ.In(timeutil.BeijingZone).Format(timeutil.DateLayout)
-		}
+		regDate := GetEffectiveRegisterDate(o, tzMap)
 
 		if regDate == dateStr {
 			dist.NewRecharge = dist.NewRecharge.Add(amt)
@@ -200,7 +198,7 @@ func (s *RechargeStatService) CalculateAllDailyDistribution(ctx context.Context)
 	if err != nil {
 		return err
 	}
-	platforms := []string{"all", "rocnovel", "flicknovel"}
+	platforms := []string{"ALL", "rocnovel", "flicknovel"}
 	for _, u := range users {
 		for _, p := range platforms {
 			_ = s.CalculateDailyDistributionForUser(ctx, p, u.ID)

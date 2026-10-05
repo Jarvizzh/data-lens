@@ -1,6 +1,8 @@
 package service
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -38,6 +40,20 @@ func (c *LtvMemoryCache) Set(key string, data interface{}) {
 	c.items.Store(key, cacheEntry{
 		data:      data,
 		timestamp: time.Now(),
+	})
+}
+
+func (c *LtvMemoryCache) Delete(key string) {
+	c.items.Delete(key)
+}
+
+func (c *LtvMemoryCache) InvalidateUser(userID int64) {
+	suffix := fmt.Sprintf(":%d", userID)
+	c.items.Range(func(key, value interface{}) bool {
+		if k, ok := key.(string); ok && strings.HasSuffix(k, suffix) {
+			c.items.Delete(key)
+		}
+		return true
 	})
 }
 

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
 )
 
 // LtvDailyStat LTV 每日统计汇总表 (包含 60 天充值 & ROI 字段)
@@ -161,6 +162,13 @@ type LtvDailyStat struct {
 }
 
 func (LtvDailyStat) TableName() string { return "ltv_daily_stat" }
+
+func (s *LtvDailyStat) AfterFind(tx *gorm.DB) error {
+	if len(s.LaunchDate) >= 10 {
+		s.LaunchDate = s.LaunchDate[:10]
+	}
+	return nil
+}
 
 // GetRechargeForDay 获取指定天的充值金额
 func (s *LtvDailyStat) GetRechargeForDay(day int) decimal.Decimal {

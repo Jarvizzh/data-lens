@@ -19,6 +19,7 @@ type LtvService struct {
 	ltvStatRepo       *repository.LtvStatRepository
 	orderRepo         *repository.OrderRepository
 	userRepo          *repository.UserRepository
+	userSvc           *UserService
 	predictSvc        *PredictService
 	cache             *LtvMemoryCache
 	monthlySummarySvc *MonthlySummaryService
@@ -29,6 +30,7 @@ func NewLtvService(
 	ltvStatRepo *repository.LtvStatRepository,
 	orderRepo *repository.OrderRepository,
 	userRepo *repository.UserRepository,
+	userSvc *UserService,
 	predictSvc *PredictService,
 	cache *LtvMemoryCache,
 	monthlySummarySvc *MonthlySummaryService,
@@ -38,6 +40,7 @@ func NewLtvService(
 		ltvStatRepo:       ltvStatRepo,
 		orderRepo:         orderRepo,
 		userRepo:          userRepo,
+		userSvc:           userSvc,
 		predictSvc:        predictSvc,
 		cache:             cache,
 		monthlySummarySvc: monthlySummarySvc,
@@ -49,9 +52,11 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 	if targetUserID <= 0 {
 		targetUserID = 1
 	}
-	pCode := strings.ToLower(platformCode)
-	if pCode == "" {
-		pCode = "all"
+	pCode := strings.ToLower(strings.TrimSpace(platformCode))
+	isAll := pCode == "" || pCode == "all"
+	targetPlatform := "ALL"
+	if !isAll {
+		targetPlatform = pCode
 	}
 
 	cacheKey := fmt.Sprintf("ltv:list:%s:%d", pCode, targetUserID)
@@ -61,15 +66,29 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 		}
 	}
 
-	startDate := s.calculator.GetLaunchStartDateForPlatform(pCode)
-	stats, err := s.ltvStatRepo.FindStatsByFilter(ctx, pCode, []int64{targetUserID}, startDate, "")
+	startDate := s.calculator.GetLaunchStartDateForPlatform(targetPlatform)
+	stats, err := s.ltvStatRepo.FindStatsByFilter(ctx, targetPlatform, []int64{targetUserID}, startDate, "")
 	if err != nil {
 		return nil, fmt.Errorf("find ltv stats failed: %w", err)
 	}
 
-	if len(stats) == 0 {
-		_ = s.CalculateLtvStatsForUserDirect(ctx, pCode, targetUserID)
-		stats, _ = s.ltvStatRepo.FindStatsByFilter(ctx, pCode, []int64{targetUserID}, startDate, "")
+	todayBj := time.Now().In(timeutil.BeijingZone)
+	todayStr := todayBj.Format(timeutil.DateLayout)
+
+	allZeros := len(stats) > 0
+	for _, st := range stats {
+		if st.Spend.GreaterThan(decimal.Zero) || st.TotalRecharge.GreaterThan(decimal.Zero) {
+			allZeros = false
+			break
+		}
+	}
+
+	isMissingStartDate := len(stats) > 0 && stats[0].LaunchDate > startDate
+	isMissingToday := len(stats) > 0 && stats[len(stats)-1].LaunchDate < todayStr
+
+	if len(stats) == 0 || allZeros || isMissingStartDate || isMissingToday {
+		_ = s.CalculateLtvStatsForUserDirect(ctx, targetPlatform, targetUserID)
+		stats, _ = s.ltvStatRepo.FindStatsByFilter(ctx, targetPlatform, []int64{targetUserID}, startDate, "")
 	}
 
 	totalSpend := decimal.Zero
@@ -77,8 +96,7 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 	totalSubUsers := 0
 	totalRetainedSubUsers := 0
 	cohortCurves := make(map[*model.LtvDailyStat][]float64)
-	today := time.Now().In(timeutil.BeijingZone)
-	minLaunchDate := today
+	minLaunchDate := todayBj
 
 	for _, stat := range stats {
 		totalSpend = totalSpend.Add(stat.Spend)
@@ -93,13 +111,13 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 			if lDate.Before(minLaunchDate) {
 				minLaunchDate = lDate
 			}
-			daysElapsed := int(today.Sub(lDate).Hours()/24) + 1
+			daysElapsed := int(todayBj.Sub(lDate).Hours()/24) + 1
 			curve := s.predictSvc.PredictCohortDailyRechargeCurve(ctx, stat, daysElapsed)
 			cohortCurves[stat] = curve
 		}
 	}
 
-	overallPred := s.predictSvc.facade.AssembleOverallPrediction(totalSpend, totalRecharge, stats, cohortCurves, minLaunchDate, today)
+	overallPred := s.predictSvc.facade.AssembleOverallPrediction(totalSpend, totalRecharge, stats, cohortCurves, minLaunchDate, todayBj)
 	monthlySummary := s.monthlySummarySvc.BuildMonthlySummary(ctx, stats)
 
 	retainedRateStr := "0.00%"
@@ -135,50 +153,192 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 
 // CalculateLtvStatsForUserDirect 计算指定用户的 LTV 数据并持久化
 func (s *LtvService) CalculateLtvStatsForUserDirect(ctx context.Context, platformCode string, userID int64) error {
-	pCode := strings.ToLower(platformCode)
-	if pCode == "" {
-		pCode = "all"
+	pCode := strings.ToLower(strings.TrimSpace(platformCode))
+	isAll := pCode == "" || pCode == "all"
+	targetPlatform := "ALL"
+	if !isAll {
+		targetPlatform = pCode
 	}
 
-	landingPages, err := s.userRepo.FindLandingPages(ctx, pCode, userID)
+	user, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil || user == nil {
+		return fmt.Errorf("user not found: %d", userID)
+	}
+	isMasterAcc := user.IsMaster == 1
+
+	s.cache.Delete(fmt.Sprintf("ltv:list:%s:%d", pCode, userID))
+	s.cache.Delete(fmt.Sprintf("ltv:list:all:%d", userID))
+
+	userPages, lpIDs, err := s.userSvc.GetLandingPageConfigs(ctx, targetPlatform, userID)
 	if err != nil {
-		return fmt.Errorf("find landing pages failed: %w", err)
+		return fmt.Errorf("get landing pages failed: %w", err)
 	}
-
-	lpIDs := make([]string, 0, len(landingPages))
-	tzMap := make(map[string]string)
-	for _, lp := range landingPages {
-		lpIDs = append(lpIDs, lp.LandingPageID)
+	tzMap := make(map[string]string, len(userPages))
+	for _, lp := range userPages {
 		tzMap[lp.LandingPageID] = lp.Timezone
 	}
 
-	startDate := s.calculator.GetLaunchStartDateForPlatform(pCode)
-	orders, err := s.orderRepo.FindOrdersForLtvCalculation(ctx, pCode, lpIDs, startDate, "")
-	if err != nil {
-		return fmt.Errorf("find orders failed: %w", err)
+	startDate := s.calculator.GetLaunchStartDateForPlatform(targetPlatform)
+
+	var orders []*model.RawOrder
+	if len(lpIDs) > 0 {
+		queryPlatform := targetPlatform
+		orders, err = s.orderRepo.FindOrdersForLtvCalculation(ctx, queryPlatform, lpIDs, startDate, "")
+		if err != nil {
+			return fmt.Errorf("find orders failed: %w", err)
+		}
 	}
 
 	cohortMap := make(map[string][]*model.RawOrder)
 	for _, o := range orders {
-		regDate := o.RegisterDateET
-		tz := tzMap[o.LandingPageID]
-		if strings.EqualFold(tz, "CST") {
-			regDate = o.RegisterTimeBJ.In(timeutil.BeijingZone).Format(timeutil.DateLayout)
-		}
+		regDate := GetEffectiveRegisterDate(o, tzMap)
 		if regDate >= startDate {
 			cohortMap[regDate] = append(cohortMap[regDate], o)
 		}
 	}
 
-	launchConfigs, _ := s.ltvStatRepo.FindLaunchConfigs(ctx, pCode, []int64{userID}, startDate, "")
-	spendMap := make(map[string]*model.LtvLaunchConfig)
-	for _, lc := range launchConfigs {
-		spendMap[lc.LaunchDate] = lc
+	configsByDate := make(map[string]*model.LtvLaunchConfig)
+	masterRemark := ""
+
+	if isMasterAcc {
+		subUserIDs, _ := s.userRepo.FindSubAccountIDs(ctx, userID)
+		var subUsernames []string
+		for _, sid := range subUserIDs {
+			if u, err := s.userRepo.FindByID(ctx, sid); err == nil && u != nil {
+				subUsernames = append(subUsernames, u.Username)
+			}
+		}
+		subNamesStr := strings.Join(subUsernames, "、")
+		if subNamesStr != "" {
+			masterRemark = "汇总数据（子账号：" + subNamesStr + "）"
+		} else {
+			masterRemark = "汇总数据"
+		}
+
+		sumSpendMap := make(map[string]decimal.Decimal)
+		remarkMap := make(map[string][]string)
+
+		for _, subID := range subUserIDs {
+			var subConfigs []*model.LtvLaunchConfig
+			if isAll {
+				subConfigs, _ = s.ltvStatRepo.FindLaunchConfigs(ctx, "", []int64{subID}, startDate, "")
+			} else {
+				subConfigs, _ = s.ltvStatRepo.FindLaunchConfigs(ctx, pCode, []int64{subID}, startDate, "")
+			}
+			for _, sc := range subConfigs {
+				if strings.EqualFold(sc.PlatformCode, "ALL") {
+					continue
+				}
+				lDate := sc.LaunchDate
+				if len(lDate) >= 10 {
+					lDate = lDate[:10]
+				}
+				if lDate != "" {
+					sumSpendMap[lDate] = sumSpendMap[lDate].Add(sc.Spend)
+					cleanRemark := strings.TrimSpace(sc.Remark)
+					if cleanRemark != "" {
+						formatted := cleanRemark
+						if lDate >= "2026-09-16" {
+							formatted = formatPlatformRemark(sc.PlatformCode, cleanRemark)
+						}
+						rList := remarkMap[lDate]
+						if !containsString(rList, formatted) {
+							remarkMap[lDate] = append(remarkMap[lDate], formatted)
+						}
+					}
+				}
+			}
+		}
+
+		allDates := make(map[string]bool)
+		for d := range sumSpendMap {
+			allDates[d] = true
+		}
+		for d := range remarkMap {
+			allDates[d] = true
+		}
+
+		for d := range allDates {
+			spend := sumSpendMap[d]
+			rmk := masterRemark
+			if isAll {
+				if rList, ok := remarkMap[d]; ok && len(rList) > 0 {
+					rmk = strings.Join(rList, " | ")
+				}
+			}
+			configsByDate[d] = &model.LtvLaunchConfig{
+				PlatformCode: targetPlatform,
+				UserID:       userID,
+				LaunchDate:   d,
+				Spend:        spend,
+				Remark:       rmk,
+			}
+		}
+	} else {
+		var list []*model.LtvLaunchConfig
+		if isAll {
+			list, _ = s.ltvStatRepo.FindLaunchConfigs(ctx, "", []int64{userID}, startDate, "")
+			sumSpendMap := make(map[string]decimal.Decimal)
+			remarkMap := make(map[string][]string)
+			for _, c := range list {
+				if strings.EqualFold(c.PlatformCode, "ALL") {
+					continue
+				}
+				lDate := c.LaunchDate
+				if len(lDate) >= 10 {
+					lDate = lDate[:10]
+				}
+				if lDate != "" {
+					sumSpendMap[lDate] = sumSpendMap[lDate].Add(c.Spend)
+					cleanRemark := strings.TrimSpace(c.Remark)
+					if cleanRemark != "" {
+						formatted := cleanRemark
+						if lDate >= "2026-09-16" {
+							formatted = formatPlatformRemark(c.PlatformCode, cleanRemark)
+						}
+						rList := remarkMap[lDate]
+						if !containsString(rList, formatted) {
+							remarkMap[lDate] = append(remarkMap[lDate], formatted)
+						}
+					}
+				}
+			}
+			allDates := make(map[string]bool)
+			for d := range sumSpendMap {
+				allDates[d] = true
+			}
+			for d := range remarkMap {
+				allDates[d] = true
+			}
+			for d := range allDates {
+				spend := sumSpendMap[d]
+				rmk := ""
+				if rList, ok := remarkMap[d]; ok && len(rList) > 0 {
+					rmk = strings.Join(rList, " | ")
+				}
+				configsByDate[d] = &model.LtvLaunchConfig{
+					PlatformCode: "ALL",
+					UserID:       userID,
+					LaunchDate:   d,
+					Spend:        spend,
+					Remark:       rmk,
+				}
+			}
+		} else {
+			list, _ = s.ltvStatRepo.FindLaunchConfigs(ctx, pCode, []int64{userID}, startDate, "")
+			for _, c := range list {
+				lDate := c.LaunchDate
+				if len(lDate) >= 10 {
+					lDate = lDate[:10]
+				}
+				configsByDate[lDate] = c
+			}
+		}
 	}
 
-	today := time.Now().In(timeutil.BeijingZone)
+	todayBj := time.Now().In(timeutil.BeijingZone)
 	startDateTime, _ := time.ParseInLocation(timeutil.DateLayout, startDate, timeutil.BeijingZone)
-	totalDays := int(today.Sub(startDateTime).Hours()/24) + 1
+	totalDays := int(todayBj.Sub(startDateTime).Hours()/24) + 1
 
 	stats := make([]*model.LtvDailyStat, 0, totalDays)
 	for i := 0; i < totalDays; i++ {
@@ -187,17 +347,19 @@ func (s *LtvService) CalculateLtvStatsForUserDirect(ctx context.Context, platfor
 
 		spend := decimal.Zero
 		remark := ""
-		if cfg, ok := spendMap[dateStr]; ok {
+		if cfg, ok := configsByDate[dateStr]; ok {
 			spend = cfg.Spend
 			remark = cfg.Remark
+		} else if isMasterAcc {
+			remark = masterRemark
 		}
 
-		stat := s.calculator.CalculateSingleCohort(ctx, pCode, userID, dateStr, cohortOrders, spend, remark, today, tzMap)
+		stat := s.calculator.CalculateSingleCohort(ctx, targetPlatform, userID, dateStr, cohortOrders, spend, remark, todayBj, tzMap)
 		stats = append(stats, stat)
 	}
 
-	if err := s.ltvStatRepo.BatchUpsertLtvDailyStat(ctx, stats); err != nil {
-		return fmt.Errorf("batch upsert ltv stats failed: %w", err)
+	if err := s.ltvStatRepo.DeleteAndBatchInsert(ctx, targetPlatform, userID, stats); err != nil {
+		return fmt.Errorf("delete and batch insert ltv stats failed: %w", err)
 	}
 
 	s.cache.CleanExpired()
@@ -219,6 +381,14 @@ func (s *LtvService) SaveLaunchConfig(ctx context.Context, req dto.SaveLaunchCon
 	}
 	_ = s.CalculateLtvStatsForUserDirect(ctx, req.PlatformCode, req.UserID)
 	_ = s.CalculateLtvStatsForUserDirect(ctx, "all", req.UserID)
+
+	// 触发关联主账号重算
+	if masters, err := s.userRepo.FindMasterUserIDs(ctx, req.UserID); err == nil {
+		for _, mID := range masters {
+			_ = s.CalculateLtvStatsForUserDirect(ctx, req.PlatformCode, mID)
+			_ = s.CalculateLtvStatsForUserDirect(ctx, "all", mID)
+		}
+	}
 	return nil
 }
 
@@ -244,6 +414,14 @@ func (s *LtvService) BatchSaveLaunchConfig(ctx context.Context, platformCode str
 	}
 	_ = s.CalculateLtvStatsForUserDirect(ctx, pCode, userID)
 	_ = s.CalculateLtvStatsForUserDirect(ctx, "all", userID)
+
+	// 触发关联主账号重算
+	if masters, err := s.userRepo.FindMasterUserIDs(ctx, userID); err == nil {
+		for _, mID := range masters {
+			_ = s.CalculateLtvStatsForUserDirect(ctx, pCode, mID)
+			_ = s.CalculateLtvStatsForUserDirect(ctx, "all", mID)
+		}
+	}
 	return count, nil
 }
 
@@ -262,3 +440,29 @@ func (s *LtvService) CalculateAllLtvStats(ctx context.Context) error {
 	return nil
 }
 
+func containsString(list []string, item string) bool {
+	for _, s := range list {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+func formatPlatformRemark(platformCode, rawRemark string) string {
+	if rawRemark == "" {
+		return ""
+	}
+	pName := platformCode
+	switch strings.ToLower(platformCode) {
+	case "rocnovel":
+		pName = "洛奇小说"
+	case "flicknovel":
+		pName = "番茄司南"
+	}
+	prefix := pName + "："
+	if strings.HasPrefix(rawRemark, prefix) {
+		return rawRemark
+	}
+	return prefix + rawRemark
+}

@@ -63,17 +63,17 @@ func main() {
 	flicknovelClient := flicknovel.NewClient(&cfg.Flicknovel.API)
 
 	// 6. 初始化业务服务层
+	userSvc := service.NewUserService(userRepo, orderRepo, flicknovelRepo)
+	permSvc := service.NewUserPermissionService(userRepo)
 	predictSvc := service.NewPredictService(benchmarkRepo)
 	ltvCache := service.NewLtvMemoryCache(30 * time.Minute)
 	calculator := service.NewLtvCalculator(orderRepo, ltvStatRepo, userRepo, predictSvc)
 	monthlySummarySvc := service.NewMonthlySummaryService()
-	ltvSvc := service.NewLtvService(calculator, ltvStatRepo, orderRepo, userRepo, predictSvc, ltvCache, monthlySummarySvc)
-	rechargeSvc := service.NewRechargeStatService(orderRepo, userRepo, rechargeDistRepo)
+	ltvSvc := service.NewLtvService(calculator, ltvStatRepo, orderRepo, userRepo, userSvc, predictSvc, ltvCache, monthlySummarySvc)
+	rechargeSvc := service.NewRechargeStatService(orderRepo, userRepo, userSvc, rechargeDistRepo)
 	dailyDistSvc := service.NewDailyDistributionService(rechargeDistRepo, orderRepo, userRepo, rechargeSvc)
 	syncMgr := service.NewSyncManager(orderRepo, flicknovelRepo, rocnovelClient, flicknovelClient)
-	userSvc := service.NewUserService(userRepo, orderRepo, flicknovelRepo)
-	permSvc := service.NewUserPermissionService(userRepo)
-	settleSvc := service.NewSettlementService(settleRepo, orderRepo, userRepo)
+	settleSvc := service.NewSettlementService(settleRepo, orderRepo, userRepo, userSvc)
 
 	// 7. 启动定时任务调度器
 	scheduler := cron.NewTaskScheduler(syncMgr, ltvSvc, rechargeSvc, ltvCache, logger)

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
 )
 
 // LtvLaunchConfig 投放消耗与备注配置表
@@ -17,6 +18,13 @@ type LtvLaunchConfig struct {
 }
 
 func (LtvLaunchConfig) TableName() string { return "ltv_launch_config" }
+
+func (c *LtvLaunchConfig) AfterFind(tx *gorm.DB) error {
+	if len(c.LaunchDate) >= 10 {
+		c.LaunchDate = c.LaunchDate[:10]
+	}
+	return nil
+}
 
 // DailyRechargeDistribution 每日充值分布统计汇总表 (自然日)
 type DailyRechargeDistribution struct {
@@ -47,6 +55,13 @@ type DailyRechargeDistribution struct {
 }
 
 func (DailyRechargeDistribution) TableName() string { return "daily_recharge_distribution" }
+
+func (d *DailyRechargeDistribution) AfterFind(tx *gorm.DB) error {
+	if len(d.Date) >= 10 {
+		d.Date = d.Date[:10]
+	}
+	return nil
+}
 
 // LtvPredictBenchmark LTV 预测基准数据表
 type LtvPredictBenchmark struct {

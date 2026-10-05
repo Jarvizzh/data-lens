@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 
 	"go_backend/internal/model"
 
@@ -40,9 +41,12 @@ func (r *RechargeDistributionRepository) FindByFilter(
 	var list []*model.DailyRechargeDistribution
 	q := r.db.WithContext(ctx)
 
-	if platformCode != "" && platformCode != "ALL" {
-		q = q.Where("platform_code = ?", platformCode)
+	targetPlatform := "ALL"
+	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
+		targetPlatform = strings.ToLower(platformCode)
 	}
+	q = q.Where("platform_code = ?", targetPlatform)
+
 	if len(userIDs) > 0 {
 		q = q.Where("user_id IN ?", userIDs)
 	}
@@ -54,5 +58,12 @@ func (r *RechargeDistributionRepository) FindByFilter(
 	}
 
 	err := q.Order("date desc, user_id asc").Find(&list).Error
+	if err == nil {
+		for _, d := range list {
+			if len(d.Date) >= 10 {
+				d.Date = d.Date[:10]
+			}
+		}
+	}
 	return list, err
 }

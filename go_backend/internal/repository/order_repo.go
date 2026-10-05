@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 
 	"go_backend/internal/model"
 
@@ -43,11 +44,14 @@ func (r *OrderRepository) FindOrdersForLtvCalculation(
 	landingPageIDs []string,
 	startDate, endDate string,
 ) ([]*model.RawOrder, error) {
+	if landingPageIDs != nil && len(landingPageIDs) == 0 {
+		return []*model.RawOrder{}, nil
+	}
 	var orders []*model.RawOrder
 	q := r.db.WithContext(ctx).Where("pay_state = 1")
 
-	if platformCode != "" && platformCode != "ALL" {
-		q = q.Where("platform_code = ?", platformCode)
+	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
+		q = q.Where("platform_code = ?", strings.ToLower(platformCode))
 	}
 	if len(landingPageIDs) > 0 {
 		q = q.Where("landing_page_id IN ?", landingPageIDs)
@@ -67,8 +71,8 @@ func (r *OrderRepository) FindOrdersForLtvCalculation(
 func (r *OrderRepository) FindDistinctLandingPageIDs(ctx context.Context, platformCode string) ([]string, error) {
 	var ids []string
 	q := r.db.WithContext(ctx).Model(&model.RawOrder{}).Where("landing_page_id IS NOT NULL AND landing_page_id != ''")
-	if platformCode != "" && platformCode != "ALL" {
-		q = q.Where("platform_code = ?", platformCode)
+	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
+		q = q.Where("platform_code = ?", strings.ToLower(platformCode))
 	}
 	err := q.Distinct().Pluck("landing_page_id", &ids).Error
 	return ids, err

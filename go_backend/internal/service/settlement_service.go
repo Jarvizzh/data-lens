@@ -19,17 +19,20 @@ type SettlementService struct {
 	settleRepo *repository.SettlementRepository
 	orderRepo  *repository.OrderRepository
 	userRepo   *repository.UserRepository
+	userSvc    *UserService
 }
 
 func NewSettlementService(
 	settleRepo *repository.SettlementRepository,
 	orderRepo *repository.OrderRepository,
 	userRepo *repository.UserRepository,
+	userSvc *UserService,
 ) *SettlementService {
 	return &SettlementService{
 		settleRepo: settleRepo,
 		orderRepo:  orderRepo,
 		userRepo:   userRepo,
+		userSvc:    userSvc,
 	}
 }
 
@@ -74,7 +77,7 @@ func (s *SettlementService) GetMonthlySettlementList(
 		if u != nil {
 			targetUsername = u.Username
 		}
-		userPages, _ := s.userRepo.FindLandingPages(ctx, pCode, *targetUserID)
+		userPages, _, _ := s.userSvc.GetLandingPageConfigs(ctx, pCode, *targetUserID)
 		userPidMap = make(map[string]bool)
 		for _, up := range userPages {
 			userPidMap[up.LandingPageID] = true
