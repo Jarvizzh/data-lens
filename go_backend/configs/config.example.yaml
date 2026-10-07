@@ -3,7 +3,7 @@ server:
 
 database:
   mysql:
-    dsn: "root:123456@tcp(localhost:3306)/meta_zw_ltv?charset=utf8mb4&parseTime=True&loc=Asia%2FShanghai"
+    dsn: "root:123456@tcp(localhost:3306)/meta_ltv?charset=utf8mb4&parseTime=True&loc=Asia%2FShanghai"
     max_idle_conns: 10
     max_open_conns: 50
     conn_max_lifetime_min: 30
@@ -29,3 +29,9 @@ app:
     password: "@super"
     token_expire_days: 7
     secret_key: "zw-ltv-secret-auth-key-2026-v2"
+
+logger:
+  level: "info"       # debug, info, warn, error (系统业务正常INFO日志正常打印；GIN常规200请求设为DEBUG自动过滤；4xx输出WARN；5xx输出ERROR)
+  format: "console"   # console (终端高可读彩色格式) | json (生产环境结构化采集)
+  show_caller: true   # 是否打印代码调用文件名与行号
+

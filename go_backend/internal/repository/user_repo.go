@@ -234,3 +234,11 @@ func (r *UserRepository) IsMasterAccount(ctx context.Context, userID int64) (boo
 	return u != nil && u.IsMaster == 1, nil
 }
 
+// AddLandingPagesBatch 批量追加落地页配置
+func (r *UserRepository) AddLandingPagesBatch(ctx context.Context, pages []*model.UserLandingPage) error {
+	if len(pages) == 0 {
+		return nil
+	}
+	return r.db.WithContext(ctx).Create(&pages).Error
+}
+

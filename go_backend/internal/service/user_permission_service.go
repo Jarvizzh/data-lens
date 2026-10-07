@@ -133,6 +133,19 @@ func (s *UserPermissionService) CanUserModifyTarget(ctx context.Context, current
 	return s.userRepo.ExistsSubAccount(ctx, currentUserID, targetUserID)
 }
 
+// HasPermGlobalDistribution 判断用户是否拥有平台汇总权限 (对应 Java user.hasPermGlobalDistribution())
+func (s *UserPermissionService) HasPermGlobalDistribution(ctx context.Context, userID int64) bool {
+	if userID <= 0 {
+		return false
+	}
+	user, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil || user == nil {
+		return false
+	}
+	return strings.EqualFold(user.Role, "SUPER_ADMIN") || user.PermGlobalDistribution == 1
+}
+
+
 // GetSettlementAccountsForUser 获取结算账号列表
 func (s *UserPermissionService) GetSettlementAccountsForUser(ctx context.Context, userID int64) ([]dto.VisibleAccountDto, error) {
 	user, err := s.userRepo.FindByID(ctx, userID)

@@ -4,6 +4,7 @@ import (
 	"go_backend/internal/middleware"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 type RouterParams struct {
@@ -15,13 +16,14 @@ type RouterParams struct {
 	PlatformHandler   *PlatformHandler
 	TokenHandler      *TokenHandler
 	FlicknovelHandler *FlicknovelHandler
+	Logger            *zap.Logger
 }
 
 func SetupRouter(p RouterParams) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(gin.Logger())
-	r.Use(gin.Recovery())
+	r.Use(middleware.GinLogger(p.Logger))
+	r.Use(middleware.GinRecovery(p.Logger, true))
 	r.Use(middleware.CORSMiddleware())
 
 	api := r.Group("/api")
@@ -57,7 +59,7 @@ func SetupRouter(p RouterParams) *gin.Engine {
 				ltv.POST("/launch-config", p.LtvHandler.SaveLaunchConfig)
 				ltv.POST("/batch-spend", p.LtvHandler.BatchSpend)
 				ltv.POST("/recalculate", p.LtvHandler.Recalculate)
-				ltv.POST("/recalculate-ltv", p.LtvHandler.Recalculate)
+				ltv.POST("/recalculate-ltv", p.LtvHandler.RecalculateLtv)
 				ltv.POST("/recalculate-daily-distribution", p.LtvHandler.RecalculateDailyDistribution)
 				ltv.POST("/sync-orders", p.LtvHandler.SyncOrders)
 				ltv.POST("/sync-and-calc", p.LtvHandler.SyncAndCalc)

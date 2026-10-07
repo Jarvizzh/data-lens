@@ -362,3 +362,64 @@ func (s *UserService) GetAllPlatformLandingPageIds(ctx context.Context, platform
 
 	return result, nil
 }
+
+// AutoImportFlicknovelLandingPagesForAdmins 自动为所有超级管理员/管理员补齐番茄司南全量推广ID (对齐 Java UserService.autoImportFlicknovelLandingPagesForAdmins)
+func (s *UserService) AutoImportFlicknovelLandingPagesForAdmins(ctx context.Context) (int, error) {
+	allPids, err := s.GetAllPlatformLandingPageIds(ctx, "flicknovel")
+	if err != nil || len(allPids) == 0 {
+		return 0, nil
+	}
+
+	users, err := s.userRepo.FindAll(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	var admins []*model.SysUser
+	for _, u := range users {
+		if u.Status == 1 && u.IsMaster != 1 && (strings.EqualFold(u.Role, "ADMIN") || strings.EqualFold(u.Role, "SUPER_ADMIN")) {
+			admins = append(admins, u)
+		}
+	}
+	if len(admins) == 0 {
+		return 0, nil
+	}
+
+	totalImported := 0
+	for _, admin := range admins {
+		existingPages, err := s.userRepo.FindLandingPages(ctx, "flicknovel", admin.ID)
+		if err != nil {
+			continue
+		}
+
+		existingPids := make(map[string]bool)
+		for _, ep := range existingPages {
+			pid := strings.TrimSpace(ep.LandingPageID)
+			if pid != "" && pid != "__EMPTY__" {
+				existingPids[pid] = true
+			}
+		}
+
+		var toAdd []*model.UserLandingPage
+		for _, pid := range allPids {
+			cleanPid := strings.TrimSpace(pid)
+			if cleanPid != "" && cleanPid != "__EMPTY__" && !existingPids[cleanPid] {
+				toAdd = append(toAdd, &model.UserLandingPage{
+					PlatformCode:  "flicknovel",
+					UserID:        admin.ID,
+					LandingPageID: cleanPid,
+					Timezone:      "UTC",
+				})
+				existingPids[cleanPid] = true
+			}
+		}
+
+		if len(toAdd) > 0 {
+			if err := s.userRepo.AddLandingPagesBatch(ctx, toAdd); err == nil {
+				totalImported += len(toAdd)
+			}
+		}
+	}
+
+	return totalImported, nil
+}

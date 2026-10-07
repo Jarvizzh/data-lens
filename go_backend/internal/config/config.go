@@ -13,6 +13,7 @@ type Config struct {
 	Order      OrderAPIConfig   `mapstructure:"order"`
 	Flicknovel FlicknovelConfig `mapstructure:"flicknovel"`
 	App        AppConfig        `mapstructure:"app"`
+	Logger     LoggerConfig     `mapstructure:"logger"`
 }
 
 type ServerConfig struct {
@@ -64,6 +65,12 @@ type AuthConfig struct {
 	SecretKey       string `mapstructure:"secret_key"`
 }
 
+type LoggerConfig struct {
+	Level      string `mapstructure:"level"`
+	Format     string `mapstructure:"format"`
+	ShowCaller bool   `mapstructure:"show_caller"`
+}
+
 var GlobalConfig Config
 
 func LoadConfig(configPath string) (*Config, error) {
@@ -90,6 +97,15 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.App.Auth.TokenExpireDays == 0 {
 		cfg.App.Auth.TokenExpireDays = 7
+	}
+	if cfg.Logger.Level == "" {
+		cfg.Logger.Level = "info"
+	}
+	if cfg.Logger.Format == "" {
+		cfg.Logger.Format = "console"
+	}
+	if !v.IsSet("logger.show_caller") {
+		cfg.Logger.ShowCaller = true
 	}
 
 	GlobalConfig = cfg

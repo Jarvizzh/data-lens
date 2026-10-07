@@ -95,8 +95,14 @@ func (h *LtvHandler) GetDailyDistribution(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// GetGlobalDailyDistribution 获取平台汇总充值分布 (仅有权限用户可访问)
+// GetGlobalDailyDistribution 获取平台汇总充值分布 (仅有权限用户可访问，对应 Java userService.hasPermGlobalDistribution 校验)
 func (h *LtvHandler) GetGlobalDailyDistribution(c *gin.Context) {
+	u := middleware.GetCurrentUser(c)
+	if u == nil || h.permSvc == nil || !h.permSvc.HasPermGlobalDistribution(c.Request.Context(), u.UserID) {
+		response.Error(c, 403, "无权访问，请联系超级管理员分配「平台汇总」功能权限")
+		return
+	}
+
 	platformCode := c.DefaultQuery("platformCode", "ALL")
 	resp, err := h.distSvc.GetGlobalDailyDistributionResponse(c.Request.Context(), platformCode)
 	if err != nil {
@@ -171,13 +177,15 @@ func (h *LtvHandler) BatchSpend(c *gin.Context) {
 	})
 }
 
-// Recalculate 重新计算 LTV 报表 (/api/ltv/recalculate)
+// Recalculate 重新计算 LTV 报表与每日充值分布 (/api/ltv/recalculate)
 func (h *LtvHandler) Recalculate(c *gin.Context) {
 	platformCode := c.DefaultQuery("platformCode", "ALL")
 	targetUID := h.resolveTargetUserID(c)
 
-	_ = h.ltvSvc.CalculateLtvStatsForUserDirect(c.Request.Context(), platformCode, targetUID)
-	_ = h.ltvSvc.CalculateLtvStatsForUserDirect(c.Request.Context(), "ALL", targetUID)
+	_ = h.ltvSvc.CalculateLtvStatsForUser(c.Request.Context(), platformCode, targetUID)
+	if h.distSvc != nil {
+		_ = h.distSvc.CalculateDailyDistributionForUser(c.Request.Context(), platformCode, targetUID)
+	}
 
 	resp, err := h.ltvSvc.GetLtvListResponse(c.Request.Context(), platformCode, targetUID)
 	if err != nil {
@@ -185,6 +193,22 @@ func (h *LtvHandler) Recalculate(c *gin.Context) {
 		return
 	}
 	resp.Msg = "重算 LTV 完成"
+	c.JSON(http.StatusOK, resp)
+}
+
+// RecalculateLtv 仅重算 LTV 报表 (/api/ltv/recalculate-ltv)
+func (h *LtvHandler) RecalculateLtv(c *gin.Context) {
+	platformCode := c.DefaultQuery("platformCode", "ALL")
+	targetUID := h.resolveTargetUserID(c)
+
+	_ = h.ltvSvc.CalculateLtvStatsForUser(c.Request.Context(), platformCode, targetUID)
+
+	resp, err := h.ltvSvc.GetLtvListResponse(c.Request.Context(), platformCode, targetUID)
+	if err != nil {
+		response.Error(c, 500, "重算 LTV 失败: "+err.Error())
+		return
+	}
+	resp.Msg = "重算 LTV 报表完成！"
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -259,6 +283,9 @@ func (h *LtvHandler) SyncAndCalc(c *gin.Context) {
 		}
 	}
 	_ = h.ltvSvc.CalculateAllLtvStats(c.Request.Context())
+	if h.distSvc != nil {
+		_ = h.distSvc.CalculateAllDailyDistribution(c.Request.Context())
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"code":              0,
 		"msg":               fmt.Sprintf("数据同步与重新计算完成，共同步 %d 笔订单", totalSynced),

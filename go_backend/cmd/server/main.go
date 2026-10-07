@@ -12,34 +12,41 @@ import (
 	"go_backend/internal/config"
 	"go_backend/internal/cron"
 	"go_backend/internal/handler"
+	"go_backend/internal/pkg/logger"
 	"go_backend/internal/repository"
 	"go_backend/internal/service"
 	"go_backend/internal/service/client/flicknovel"
 	"go_backend/internal/service/client/rocnovel"
 
+	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 )
 
 func main() {
-	// 1. 初始化日志
-	logger, err := zap.NewProduction()
-	if err != nil {
-		fmt.Printf("Init zap logger failed: %v\n", err)
-		os.Exit(1)
-	}
-	defer logger.Sync()
+	// 启用数值形式序列化 (对齐 Java Jackson BigDecimal 行为)
+	decimal.MarshalJSONWithoutQuotes = true
 
-	logger.Info("Starting LTV-STAT-SYSTEM Go Backend...")
-
-	// 2. 加载配置
+	// 1. 加载配置
 	configPath := "configs/config.yaml"
 	if envPath := os.Getenv("CONFIG_PATH"); envPath != "" {
 		configPath = envPath
 	}
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
-		logger.Fatal("Load config failed", zap.Error(err))
+		fmt.Printf("Load config failed: %v\n", err)
+		os.Exit(1)
 	}
+
+	// 2. 初始化结构化/终端友好日志 (根据配置自动切换 Console/JSON 模式)
+	logInstance, err := logger.NewLogger(&cfg.Logger)
+	if err != nil {
+		fmt.Printf("Init logger failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer logInstance.Sync()
+	logger := logInstance
+
+	logger.Info("Starting LTV-STAT-SYSTEM Go Backend...")
 
 	// 3. 初始化数据库连接池
 	db, err := repository.InitDB(&cfg.Database.MySQL)
@@ -76,7 +83,7 @@ func main() {
 	settleSvc := service.NewSettlementService(settleRepo, orderRepo, userRepo, userSvc)
 
 	// 7. 启动定时任务调度器
-	scheduler := cron.NewTaskScheduler(syncMgr, ltvSvc, rechargeSvc, ltvCache, logger)
+	scheduler := cron.NewTaskScheduler(syncMgr, ltvSvc, rechargeSvc, userSvc, ltvCache, logger)
 	if err := scheduler.Start(); err != nil {
 		logger.Error("Start task scheduler failed", zap.Error(err))
 	}
@@ -94,6 +101,7 @@ func main() {
 		PlatformHandler:   handler.NewPlatformHandler(platformRepo, userRepo, syncMgr),
 		TokenHandler:      handler.NewTokenHandler(rocnovelClient, platformRepo),
 		FlicknovelHandler: flicknovelHandler,
+		Logger:            logger,
 	})
 
 	srv := &http.Server{

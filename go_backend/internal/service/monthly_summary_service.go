@@ -179,6 +179,7 @@ func CalculateActualPaybackDaysForMonth(
 // BuildMonthlySummary 从每日统计与订单中聚合近 4 个自然月的月度汇总指标
 func (s *MonthlySummaryService) BuildMonthlySummary(
 	ctx context.Context,
+	platformCode string,
 	stats []*model.LtvDailyStat,
 	orders []*model.RawOrder,
 	tzMap map[string]string,
@@ -186,6 +187,12 @@ func (s *MonthlySummaryService) BuildMonthlySummary(
 ) *dto.MonthlySummaryDto {
 	today := time.Now().In(timeutil.BeijingZone)
 	currentYM := today.Format("2006-01")
+
+	platStartDate := model.GetLaunchStartDateForPlatform(platformCode)
+	minYM := ""
+	if len(platStartDate) >= 7 {
+		minYM = platStartDate[:7]
+	}
 
 	// 按月份 (yyyy-MM) 分组每日统计
 	monthStatMap := make(map[string][]*model.LtvDailyStat)
@@ -210,6 +217,9 @@ func (s *MonthlySummaryService) BuildMonthlySummary(
 	for i := 0; i < 4; i++ {
 		targetDate := today.AddDate(0, -i, 0)
 		ym := targetDate.Format("2006-01")
+		if minYM != "" && ym < minYM {
+			break
+		}
 		groupStats := monthStatMap[ym]
 		groupOrders := monthOrderMap[ym]
 		isPastMonth := ym != currentYM

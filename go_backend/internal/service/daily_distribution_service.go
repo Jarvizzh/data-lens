@@ -3,10 +3,8 @@ package service
 import (
 	"context"
 	"strings"
-	"time"
 
 	"go_backend/internal/model"
-	"go_backend/internal/pkg/timeutil"
 	"go_backend/internal/repository"
 	"go_backend/internal/service/dto"
 
@@ -34,33 +32,51 @@ func NewDailyDistributionService(
 	}
 }
 
-// GetDailyDistributionResponse 获取指定用户/平台的每日充值分布与汇总
+// GetDailyDistributionResponse 获取指定用户/平台的每日充值分布与汇总 (对应 Java LtvController.getDailyDistribution)
 func (s *DailyDistributionService) GetDailyDistributionResponse(
 	ctx context.Context,
 	platformCode string,
 	targetUserID int64,
 ) (*dto.DailyDistributionResponseDto, error) {
-	pCode := strings.ToLower(platformCode)
-	if pCode == "" {
-		pCode = "all"
-	}
 	if targetUserID <= 0 {
 		targetUserID = 1
 	}
-
-	startDate := "2026-07-10"
-	if pCode == "flicknovel" {
-		startDate = "2026-09-16"
+	pCode := "ALL"
+	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
+		pCode = strings.ToLower(strings.TrimSpace(platformCode))
 	}
 
+	platformStartDate := model.GetLaunchStartDateForPlatform(pCode)
 	userIDs := []int64{targetUserID}
-	list, err := s.rechargeDistRepo.FindByFilter(ctx, pCode, userIDs, startDate, "")
-	if err != nil || len(list) == 0 {
-		_ = s.calcSvc.CalculateDailyDistributionForUser(ctx, pCode, targetUserID)
-		list, _ = s.rechargeDistRepo.FindByFilter(ctx, pCode, userIDs, startDate, "")
+
+	list, _ := s.rechargeDistRepo.FindByFilter(ctx, pCode, userIDs, platformStartDate, "")
+
+	// 检查是否全为 0
+	allZeros := len(list) > 0
+	if allZeros {
+		for _, item := range list {
+			if item.TotalRecharge.GreaterThan(decimal.Zero) {
+				allZeros = false
+				break
+			}
+		}
 	}
 
-	summary := s.calculateSummaryFromDistribution(list)
+	today := GetTodayForPlatform(pCode)
+	isMissingToday := len(list) > 0 && list[0].Date < today
+	isMissingStartDate := len(list) > 0 && list[len(list)-1].Date > platformStartDate
+
+	// 与 Java getDailyDistributionStats 判定严格一致
+	if len(list) == 0 || allZeros || isMissingToday || isMissingStartDate {
+		_ = s.CalculateDailyDistributionForUser(ctx, pCode, targetUserID)
+		list, _ = s.rechargeDistRepo.FindByFilter(ctx, pCode, userIDs, platformStartDate, "")
+	}
+
+	// 汇总卡片严格通过原始订单计算
+	summary, err := s.calcSvc.GetDailyDistributionSummary(ctx, pCode, targetUserID)
+	if err != nil {
+		summary = &dto.DailyDistributionSummaryDto{}
+	}
 
 	return &dto.DailyDistributionResponseDto{
 		Code:    0,
@@ -72,44 +88,71 @@ func (s *DailyDistributionService) GetDailyDistributionResponse(
 	}, nil
 }
 
-// RecalculateDailyDistribution 重新计算指定用户/平台的每日充值分布统计
+// CalculateDailyDistributionForUser 统计指定用户/平台的每日充值分布，并异步触发关联主账号数据重算
+// (对应 Java calculateDailyDistributionStatsForUser + asyncRecalculateMastersForSubUser)
+func (s *DailyDistributionService) CalculateDailyDistributionForUser(ctx context.Context, platformCode string, targetUserID int64) error {
+	if targetUserID <= 0 {
+		targetUserID = 1
+	}
+	pCode := "ALL"
+	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
+		pCode = strings.ToLower(strings.TrimSpace(platformCode))
+	}
+
+	if s.calcSvc != nil {
+		// 计算并持久化指定用户和平台的每日充值分布
+		_ = s.calcSvc.CalculateDailyDistributionForUserDirect(ctx, pCode, targetUserID)
+
+		// 异步触发所属主账号的每日充值分布重算 (后台 goroutine 执行，不阻塞当前请求，对应 Java asyncRecalculateMastersForSubUser)
+		go func(subUID int64, plat string) {
+			bgCtx := context.Background()
+			if masters, err := s.userRepo.FindMasterUserIDs(bgCtx, subUID); err == nil {
+				for _, mID := range masters {
+					_ = s.calcSvc.CalculateDailyDistributionForUserDirect(bgCtx, plat, mID)
+				}
+			}
+		}(targetUserID, pCode)
+	}
+	return nil
+}
+
+// CalculateAllDailyDistribution 全量重新计算所有用户和平台的每日充值分布 (对应 Java calculateAllDailyDistributionStats)
+func (s *DailyDistributionService) CalculateAllDailyDistribution(ctx context.Context) error {
+	if s.calcSvc != nil {
+		return s.calcSvc.CalculateAllDailyDistribution(ctx)
+	}
+	return nil
+}
+
+// RecalculateDailyDistribution 重新计算指定用户/平台的每日充值分布统计 (对应 Java LtvController.recalculateDailyDistributionOnly)
 func (s *DailyDistributionService) RecalculateDailyDistribution(
 	ctx context.Context,
 	platformCode string,
 	targetUserID int64,
 ) (*dto.DailyDistributionResponseDto, error) {
-	pCode := strings.ToLower(platformCode)
-	if pCode == "" {
-		pCode = "all"
-	}
-	if targetUserID <= 0 {
-		targetUserID = 1
-	}
-
-	if s.calcSvc != nil {
-		_ = s.calcSvc.CalculateDailyDistributionForUser(ctx, pCode, targetUserID)
-	}
-
+	_ = s.CalculateDailyDistributionForUser(ctx, platformCode, targetUserID)
 	return s.GetDailyDistributionResponse(ctx, platformCode, targetUserID)
 }
 
-// GetGlobalDailyDistributionResponse 获取全盘每日充值分布
+// GetGlobalDailyDistributionResponse 获取全盘每日充值分布 (对应 Java LtvController.getGlobalDailyDistribution)
 func (s *DailyDistributionService) GetGlobalDailyDistributionResponse(
 	ctx context.Context,
 	platformCode string,
 ) (*dto.DailyDistributionResponseDto, error) {
-	pCode := strings.ToLower(platformCode)
-	if pCode == "" {
-		pCode = "all"
+	pCode := "ALL"
+	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
+		pCode = strings.ToLower(strings.TrimSpace(platformCode))
 	}
 
-	startDate := "2026-07-10"
-	if pCode == "flicknovel" {
-		startDate = "2026-09-16"
+	list, err := s.calcSvc.GetGlobalDailyDistributionStats(ctx, pCode)
+	if err != nil {
+		return nil, err
 	}
 
-	list, _ := s.rechargeDistRepo.FindByFilter(ctx, pCode, nil, startDate, "")
-	summary := s.calculateSummaryFromDistribution(list)
+	summary, err := s.calcSvc.GetGlobalDailyDistributionSummary(ctx, pCode)
+	if err != nil {
+		return nil, err
+	}
 
 	return &dto.DailyDistributionResponseDto{
 		Code:    0,
@@ -121,70 +164,3 @@ func (s *DailyDistributionService) GetGlobalDailyDistributionResponse(
 	}, nil
 }
 
-func (s *DailyDistributionService) calculateSummaryFromDistribution(list []*model.DailyRechargeDistribution) *dto.DailyDistributionSummaryDto {
-	today := time.Now().In(timeutil.BeijingZone)
-	thisMonthStr := today.Format("2006-01")
-	lastMonthStr := today.AddDate(0, -1, 0).Format("2006-01")
-
-	sum := &dto.DailyDistributionSummaryDto{
-		TotalRecharge:     decimal.Zero,
-		NewRecharge:       decimal.Zero,
-		OldRecharge:       decimal.Zero,
-		ThisMonthRecharge: decimal.Zero,
-		ThisMonthRefund:   decimal.Zero,
-		LastMonthRecharge: decimal.Zero,
-		LastMonthRefund:   decimal.Zero,
-		ThisMonthStr:      thisMonthStr,
-		LastMonthStr:      lastMonthStr,
-		NewRechargeRatio:  decimal.Zero,
-		OldRechargeRatio:  decimal.Zero,
-		NewArpu:           decimal.Zero,
-		OldArpu:           decimal.Zero,
-		RepeatRate:        decimal.Zero,
-	}
-
-	totalPaidUsers := 0
-	newPaidUsers := 0
-	oldPaidUsers := 0
-	repeatPaidUsers := 0
-
-	for _, item := range list {
-		sum.TotalRecharge = sum.TotalRecharge.Add(item.TotalRecharge)
-		sum.NewRecharge = sum.NewRecharge.Add(item.NewRecharge)
-		sum.OldRecharge = sum.OldRecharge.Add(item.OldRecharge)
-		totalPaidUsers += item.TotalPaidUsers
-		newPaidUsers += item.NewPaidUsers
-		oldPaidUsers += item.OldPaidUsers
-		repeatPaidUsers += item.RepeatPaidUsers
-
-		if len(item.Date) >= 7 {
-			ym := item.Date[:7]
-			if ym == thisMonthStr {
-				sum.ThisMonthRecharge = sum.ThisMonthRecharge.Add(item.TotalRecharge)
-			} else if ym == lastMonthStr {
-				sum.LastMonthRecharge = sum.LastMonthRecharge.Add(item.TotalRecharge)
-			}
-		}
-	}
-
-	sum.TotalPaidUsers = totalPaidUsers
-	sum.NewPaidUsers = newPaidUsers
-	sum.OldPaidUsers = oldPaidUsers
-	sum.RepeatPaidUsers = repeatPaidUsers
-
-	if sum.TotalRecharge.GreaterThan(decimal.Zero) {
-		sum.NewRechargeRatio = sum.NewRecharge.DivRound(sum.TotalRecharge, 4)
-		sum.OldRechargeRatio = sum.OldRecharge.DivRound(sum.TotalRecharge, 4)
-	}
-	if newPaidUsers > 0 {
-		sum.NewArpu = sum.NewRecharge.DivRound(decimal.NewFromInt(int64(newPaidUsers)), 2)
-	}
-	if oldPaidUsers > 0 {
-		sum.OldArpu = sum.OldRecharge.DivRound(decimal.NewFromInt(int64(oldPaidUsers)), 2)
-	}
-	if totalPaidUsers > 0 {
-		sum.RepeatRate = decimal.NewFromInt(int64(repeatPaidUsers)).DivRound(decimal.NewFromInt(int64(totalPaidUsers)), 4)
-	}
-
-	return sum
-}

@@ -2,7 +2,9 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"time"
 
 	"go_backend/internal/model"
 
@@ -127,7 +129,31 @@ func (r *OrderRepository) FindOrdersByLandingPageIDs(
 	return orders, err
 }
 
+// FindAllValidOrders 查询全量有效订单 (对应 Java rawOrderRepository.findAll())
+func (r *OrderRepository) FindAllValidOrders(ctx context.Context) ([]*model.RawOrder, error) {
+	var orders []*model.RawOrder
+	err := r.db.WithContext(ctx).Where("pay_state = 1").
+		Order("register_time_bj asc, pay_time_bj asc").Find(&orders).Error
+	return orders, err
+}
+
+// FindValidOrdersByPlatform 按平台查询全量有效订单 (对应 Java rawOrderRepository.findByPlatformCode(platformCode))
+func (r *OrderRepository) FindValidOrdersByPlatform(ctx context.Context, platformCode string) ([]*model.RawOrder, error) {
+	var orders []*model.RawOrder
+	q := r.db.WithContext(ctx).Where("pay_state = 1")
+	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
+		if strings.EqualFold(platformCode, "rocnovel") {
+			q = q.Where("(platform_code = 'rocnovel' OR platform_code IS NULL OR platform_code = '' OR platform_code = 'ALL')")
+		} else {
+			q = q.Where("platform_code = ?", strings.ToLower(platformCode))
+		}
+	}
+	err := q.Order("register_time_bj asc, pay_time_bj asc").Find(&orders).Error
+	return orders, err
+}
+
 // FindSubscriptionPeriodsMap 批量查询订阅用户的周期字典
+
 func (r *OrderRepository) FindSubscriptionPeriodsMap(ctx context.Context, memberIDs []string) (map[string]int, error) {
 	periodMap := make(map[string]int)
 	if len(memberIDs) == 0 {
@@ -153,4 +179,88 @@ func (r *OrderRepository) FindSubscriptionPeriodsMap(ctx context.Context, member
 		}
 	}
 	return periodMap, nil
+}
+
+// FindHistoryOrdersByMemberIDs 批量查询指定用户的历史订单 (用于构建用户画像最早支付/注册时间)
+func (r *OrderRepository) FindHistoryOrdersByMemberIDs(ctx context.Context, platformCode string, memberIDs []string) ([]*model.RawOrder, error) {
+	if len(memberIDs) == 0 {
+		return nil, nil
+	}
+	var orders []*model.RawOrder
+	chunkSize := 500
+	pCode := strings.ToLower(strings.TrimSpace(platformCode))
+
+	for i := 0; i < len(memberIDs); i += chunkSize {
+		end := i + chunkSize
+		if end > len(memberIDs) {
+			end = len(memberIDs)
+		}
+		var chunk []*model.RawOrder
+		q := r.db.WithContext(ctx).Where("member_id IN ?", memberIDs[i:end])
+		if pCode != "" && !strings.EqualFold(pCode, "ALL") {
+			if strings.EqualFold(pCode, "rocnovel") {
+				q = q.Where("(platform_code = 'rocnovel' OR platform_code IS NULL OR platform_code = '' OR platform_code = 'ALL')")
+			} else {
+				q = q.Where("platform_code = ?", pCode)
+			}
+		}
+		if err := q.Find(&chunk).Error; err != nil {
+			return orders, err
+		}
+		orders = append(orders, chunk...)
+	}
+	return orders, nil
+}
+
+// FindUserSubscriptionPeriod 查询指定用户的订阅周期记录
+func (r *OrderRepository) FindUserSubscriptionPeriod(ctx context.Context, memberID string) (*model.UserSubscriptionPeriod, error) {
+	var period model.UserSubscriptionPeriod
+	err := r.db.WithContext(ctx).Where("member_id = ?", memberID).First(&period).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &period, nil
+}
+
+// SaveUserSubscriptionPeriod 保存或更新用户订阅周期记录
+func (r *OrderRepository) SaveUserSubscriptionPeriod(ctx context.Context, period *model.UserSubscriptionPeriod) error {
+	if period == nil || strings.TrimSpace(period.MemberID) == "" {
+		return nil
+	}
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "member_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"landing_page_id", "subscribe_config_id", "sub_period_days", "first_price_cent", "renew_price_cent", "updated_at"}),
+	}).Create(period).Error
+}
+
+// FindMatchingFirstPriceVersions 按落地页、首订价格和生效时间匹配订阅版本
+func (r *OrderRepository) FindMatchingFirstPriceVersions(ctx context.Context, landingPageID string, priceCent int, targetTime time.Time) ([]*model.SubscriptionConfigVersion, error) {
+	var list []*model.SubscriptionConfigVersion
+	err := r.db.WithContext(ctx).
+		Where("landing_page_id = ? AND first_price_cent = ? AND effective_start_time <= ? AND (effective_end_time IS NULL OR effective_end_time >= ?)",
+			landingPageID, priceCent, targetTime, targetTime).
+		Order("version_num desc, effective_start_time desc").
+		Find(&list).Error
+	return list, err
+}
+
+// FindMatchingPageVersions 按落地页和生效时间匹配订阅版本
+func (r *OrderRepository) FindMatchingPageVersions(ctx context.Context, landingPageID string, targetTime time.Time) ([]*model.SubscriptionConfigVersion, error) {
+	var list []*model.SubscriptionConfigVersion
+	err := r.db.WithContext(ctx).
+		Where("landing_page_id = ? AND effective_start_time <= ? AND (effective_end_time IS NULL OR effective_end_time >= ?)",
+			landingPageID, targetTime, targetTime).
+		Order("version_num desc, effective_start_time desc").
+		Find(&list).Error
+	return list, err
+}
+
+// FindAllSubscriptionVersions 获取所有订阅配置版本
+func (r *OrderRepository) FindAllSubscriptionVersions(ctx context.Context) ([]*model.SubscriptionConfigVersion, error) {
+	var list []*model.SubscriptionConfigVersion
+	err := r.db.WithContext(ctx).Find(&list).Error
+	return list, err
 }

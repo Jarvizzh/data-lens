@@ -8,9 +8,15 @@ type BaseResponse[T any] struct {
 
 // 推广链接
 type PromotionQueryRequest struct {
-	DistAppID int64 `json:"dist_app_id,omitempty"`
-	PageIndex int   `json:"page_index"`
-	PageSize  int   `json:"page_size"`
+	Email            string  `json:"email,omitempty"`
+	PromotionID      string  `json:"promotion_id,omitempty"`
+	CreatedStartTime int64   `json:"created_start_time,omitempty"`
+	CreatedEndTime   int64   `json:"created_end_time,omitempty"`
+	DistAppID        []int64 `json:"dist_app_id,omitempty"`
+	Genres           []int64 `json:"genres,omitempty"`
+	Page             int64   `json:"page"`
+	PageSize         int64   `json:"page_size"`
+	PageIndex        int     `json:"page_index,omitempty"`
 }
 
 type PromotionQueryData struct {
@@ -33,12 +39,15 @@ type PromotionItem struct {
 
 // 充值模板
 type RechargeTemplateQueryRequest struct {
-	TemplateIDs []string `json:"template_ids,omitempty"`
-	DistAppID   int64    `json:"dist_app_id,omitempty"`
+	DisAppID  int64  `json:"dis_app_id,omitempty"`
+	DistAppID int64  `json:"dist_app_id,omitempty"`
+	Email     string `json:"email,omitempty"`
+	Page      int64  `json:"page"`
+	PageSize  int64  `json:"page_size"`
 }
 
 type RechargeTemplateData struct {
-	Templates []RechargeTemplateItem `json:"templates"`
+	Templates []RechargeTemplateItem `json:"recharge_templates"`
 }
 
 type RechargeTemplateItem struct {
@@ -50,11 +59,10 @@ type RechargeTemplateItem struct {
 
 // 订单
 type OrderQueryRequest struct {
-	DistAppID int64  `json:"dist_app_id,omitempty"`
-	StartTime string `json:"start_time"`
-	EndTime   string `json:"end_time"`
-	PageIndex int    `json:"page_index"`
-	PageSize  int    `json:"page_size"`
+	BeginTs  int64 `json:"begin_ts"`
+	EndTs    int64 `json:"end_ts"`
+	Page     int64 `json:"page"`
+	PageSize int64 `json:"page_size"`
 }
 
 type OrderQueryData struct {
@@ -64,26 +72,45 @@ type OrderQueryData struct {
 
 type OrderItem struct {
 	OrderID         string `json:"order_id"`
-	PromotionID     string `json:"promotion_id"`
 	DeviceID        string `json:"device_id"`
-	UserID          string `json:"user_id"`
-	OrderAmountCent int    `json:"order_amount_cent"` // 分
-	OrderAmountUSD  string `json:"order_amount_usd"`
-	IsSubs          int    `json:"is_subs"`
-	RenewType       int    `json:"renew_type"`
-	PayState        int    `json:"pay_state"`
-	PayTime         string `json:"pay_time"`      // yyyy-MM-dd HH:mm:ss
-	RegisterTime    string `json:"register_time"`  // yyyy-MM-dd HH:mm:ss
-	RefundStatus    int    `json:"refund_status"`
+	AdID            string `json:"ad_id"`
+	AdsetID         string `json:"adset_id"`
+	CampaignID      string `json:"campaign_id"`
+	AdAccountID     string `json:"ad_account_id"`
+	PromotionID     string `json:"promotion_id"`
+	PromotionCode   string `json:"promotion_code"`
+	DistributorID   string `json:"distributor_id"`
+	ContentID       string `json:"content_id"`
+	Language        string `json:"language"`
+	MediaChannel    string `json:"media_channel"`
+	CreatedAt       string `json:"created_at"`   // 秒级时间戳字符串
+	CompletedAt     string `json:"completed_at"` // 秒级时间戳字符串
+	USPrice         string `json:"us_price"`     // 美元金额，如 "39.99"
+	RelationID      string `json:"relation_id"`
+	AppID           string `json:"app_id"`
+	AppName         string `json:"app_name"`
+	BenefitType     int    `json:"benefit_type"`
+	RechargeType    int    `json:"recharge_type"`
+	ProductID       string `json:"product_id"`
+
+	// 兼容旧字段
+	UserID          string `json:"user_id,omitempty"`
+	OrderAmountCent int    `json:"order_amount_cent,omitempty"`
+	OrderAmountUSD  string `json:"order_amount_usd,omitempty"`
+	IsSubs          int    `json:"is_subs,omitempty"`
+	RenewType       int    `json:"renew_type,omitempty"`
+	PayState        int    `json:"pay_state,omitempty"`
+	PayTime         string `json:"pay_time,omitempty"`
+	RegisterTime    string `json:"register_time,omitempty"`
+	RefundStatus    int    `json:"refund_status,omitempty"`
 }
 
 // 染色归因
 type RelationQueryRequest struct {
-	DistAppID int64  `json:"dist_app_id,omitempty"`
-	StartTime string `json:"start_time"`
-	EndTime   string `json:"end_time"`
-	PageIndex int    `json:"page_index"`
-	PageSize  int    `json:"page_size"`
+	BeginTs  int64 `json:"begin_ts"`
+	EndTs    int64 `json:"end_ts"`
+	Page     int64 `json:"page"`
+	PageSize int64 `json:"page_size"`
 }
 
 type RelationQueryData struct {
@@ -100,9 +127,15 @@ type RelationItem struct {
 	AdsetID                string `json:"adset_id"`
 	CampaignID             string `json:"campaign_id"`
 	AdAccountID            string `json:"ad_account_id"`
-	RelationBeginTime      string `json:"relation_begin_time"` // 北京时间
+	RelationBeginTime      string `json:"relation_begin_time"` // 秒级时间戳字符串
 	RelationBeginTimestamp int64  `json:"relation_begin_timestamp"`
 	MediaChannel           string `json:"media_channel"`
 	Platform               string `json:"platform"`
 	AppID                  string `json:"app_id"`
 }
+
+// 类型别名对齐
+type OrderDto = OrderItem
+type PromotionDto = PromotionItem
+type RelationDto = RelationItem
+type RechargeTemplateDto = RechargeTemplateItem

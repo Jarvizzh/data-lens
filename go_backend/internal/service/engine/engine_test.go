@@ -22,17 +22,22 @@ func TestOptimalScaleFactor(t *testing.T) {
 	}
 }
 
+func ptrDecimal(f float64) *decimal.Decimal {
+	d := decimal.NewFromFloat(f)
+	return &d
+}
+
 func TestOlsFit(t *testing.T) {
 	stat := &model.LtvDailyStat{
-		Spend:        decimal.NewFromFloat(100.0),
-		Day1Roi:      decimal.NewFromFloat(0.30),
-		Day2Roi:      decimal.NewFromFloat(0.40),
-		Day3Roi:      decimal.NewFromFloat(0.48),
-		Day4Roi:      decimal.NewFromFloat(0.55),
-		Day5Roi:      decimal.NewFromFloat(0.60),
-		Day6Roi:      decimal.NewFromFloat(0.65),
-		Day7Roi:      decimal.NewFromFloat(0.69),
-		Day14Roi:     decimal.NewFromFloat(0.85),
+		Spend:    decimal.NewFromFloat(100.0),
+		Day1Roi:  ptrDecimal(0.30),
+		Day2Roi:  ptrDecimal(0.40),
+		Day3Roi:  ptrDecimal(0.48),
+		Day4Roi:  ptrDecimal(0.55),
+		Day5Roi:  ptrDecimal(0.60),
+		Day6Roi:  ptrDecimal(0.65),
+		Day7Roi:  ptrDecimal(0.69),
+		Day14Roi: ptrDecimal(0.85),
 	}
 
 	fit := ComputeOlsFit(stat, 14)
@@ -45,14 +50,21 @@ func TestOlsFit(t *testing.T) {
 }
 
 func TestPaybackAndRoiEngines(t *testing.T) {
+	d1R := decimal.NewFromFloat(50.0)
+	d1Roi := decimal.NewFromFloat(0.50)
+	d2R := decimal.NewFromFloat(70.0)
+	d2Roi := decimal.NewFromFloat(0.70)
+	d3R := decimal.NewFromFloat(85.0)
+	d3Roi := decimal.NewFromFloat(0.85)
+
 	stat := &model.LtvDailyStat{
 		Spend:        decimal.NewFromFloat(100.0),
-		Day1Recharge: decimal.NewFromFloat(50.0),
-		Day1Roi:      decimal.NewFromFloat(0.50),
-		Day2Recharge: decimal.NewFromFloat(70.0),
-		Day2Roi:      decimal.NewFromFloat(0.70),
-		Day3Recharge: decimal.NewFromFloat(85.0),
-		Day3Roi:      decimal.NewFromFloat(0.85),
+		Day1Recharge: &d1R,
+		Day1Roi:      &d1Roi,
+		Day2Recharge: &d2R,
+		Day2Roi:      &d2Roi,
+		Day3Recharge: &d3R,
+		Day3Roi:      &d3Roi,
 		SubUserCount: 10,
 	}
 

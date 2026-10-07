@@ -72,9 +72,23 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 		return nil, fmt.Errorf("find ltv stats failed: %w", err)
 	}
 
-	todayBj := time.Now().In(timeutil.BeijingZone)
- 
-	if len(stats) == 0 {
+	maxToday := timeutil.GetMaxToday()
+	maxTodayStr := maxToday.Format(timeutil.DateLayout)
+
+	allZeros := len(stats) > 0
+	if allZeros {
+		for _, s := range stats {
+			if s.Spend.GreaterThan(decimal.Zero) || s.TotalRecharge.GreaterThan(decimal.Zero) {
+				allZeros = false
+				break
+			}
+		}
+	}
+
+	isMissingStartDate := len(stats) > 0 && stats[0].LaunchDate > startDate
+	isMissingToday := len(stats) > 0 && stats[len(stats)-1].LaunchDate < maxTodayStr
+
+	if len(stats) == 0 || allZeros || isMissingStartDate || isMissingToday {
 		_ = s.CalculateLtvStatsForUserDirect(ctx, targetPlatform, targetUserID)
 		stats, _ = s.ltvStatRepo.FindStatsByFilter(ctx, targetPlatform, []int64{targetUserID}, startDate, "")
 	}
@@ -83,7 +97,7 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 	totalRecharge := decimal.Zero
 	totalSubUsers := 0
 	cohortCurves := make(map[*model.LtvDailyStat][]float64)
-	minLaunchDate := todayBj
+	minLaunchDate := maxToday
 
 	for _, stat := range stats {
 		totalSpend = totalSpend.Add(stat.Spend)
@@ -95,13 +109,13 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 			if lDate.Before(minLaunchDate) {
 				minLaunchDate = lDate
 			}
-			daysElapsed := int(todayBj.Sub(lDate).Hours()/24) + 1
+			daysElapsed := int(maxToday.Sub(lDate).Hours()/24) + 1
 			curve := s.predictSvc.PredictCohortDailyRechargeCurve(ctx, stat, daysElapsed)
 			cohortCurves[stat] = curve
 		}
 	}
 
-	overallPred := s.predictSvc.facade.AssembleOverallPrediction(totalSpend, totalRecharge, stats, cohortCurves, minLaunchDate, todayBj)
+	overallPred := s.predictSvc.facade.AssembleOverallPrediction(totalSpend, totalRecharge, stats, cohortCurves, minLaunchDate, maxToday)
 
 	// 获取用户落地页时区映射与实际订单，用于精确计算订阅留存与月度汇总
 	userPages, lpIDs, _ := s.userSvc.GetLandingPageConfigs(ctx, targetPlatform, targetUserID)
@@ -127,14 +141,14 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 	periodMap, _ := s.orderRepo.FindSubscriptionPeriodsMap(ctx, subMemberIDs)
 
 	overallRetention := CalculateRetainedSubscribers(userOrders, tzMap, periodMap)
-	monthlySummary := s.monthlySummarySvc.BuildMonthlySummary(ctx, stats, userOrders, tzMap, periodMap)
+	monthlySummary := s.monthlySummarySvc.BuildMonthlySummary(ctx, targetPlatform, stats, userOrders, tzMap, periodMap)
 
 	resp := &dto.LtvListResponseDto{
 		Code:                          0,
 		Msg:                           "success",
 		Data:                          stats,
 		OverallPredictedPaybackDays:   overallPred.PredictedPaybackDays,
-		OverallPaybackCycleDays:       overallPred.PredictedPaybackDays,
+		OverallPaybackCycleDays:       nil,
 		OverallPredictedDay30Roi:      overallPred.PredictedDay30Roi,
 		OverallPredictedDay60Roi:      overallPred.PredictedDay60Roi,
 		OverallPredictedDay90Roi:      overallPred.PredictedDay90Roi,
@@ -340,9 +354,23 @@ func (s *LtvService) CalculateLtvStatsForUserDirect(ctx context.Context, platfor
 		}
 	}
 
-	todayBj := time.Now().In(timeutil.BeijingZone)
+	// 预查该平台用户全部订阅会员的周期字典 (对齐 Java preloadedSubPeriodMap 优化)
+	var allSubMemberIDs []string
+	subSeen := make(map[string]bool)
+	for _, o := range orders {
+		if o.IsSubs == 1 && strings.TrimSpace(o.MemberID) != "" {
+			mID := strings.TrimSpace(o.MemberID)
+			if !subSeen[mID] {
+				subSeen[mID] = true
+				allSubMemberIDs = append(allSubMemberIDs, mID)
+			}
+		}
+	}
+	periodMap, _ := s.orderRepo.FindSubscriptionPeriodsMap(ctx, allSubMemberIDs)
+
+	maxToday := timeutil.GetMaxToday()
 	startDateTime, _ := time.ParseInLocation(timeutil.DateLayout, startDate, timeutil.BeijingZone)
-	totalDays := int(todayBj.Sub(startDateTime).Hours()/24) + 1
+	totalDays := int(maxToday.Sub(startDateTime).Hours()/24) + 1
 
 	stats := make([]*model.LtvDailyStat, 0, totalDays)
 	for i := 0; i < totalDays; i++ {
@@ -358,7 +386,7 @@ func (s *LtvService) CalculateLtvStatsForUserDirect(ctx context.Context, platfor
 			remark = masterRemark
 		}
 
-		stat := s.calculator.CalculateSingleCohort(ctx, targetPlatform, userID, dateStr, cohortOrders, spend, remark, todayBj, tzMap)
+		stat := s.calculator.CalculateSingleCohort(ctx, targetPlatform, userID, dateStr, cohortOrders, spend, remark, maxToday, tzMap, periodMap)
 		stats = append(stats, stat)
 	}
 
@@ -427,6 +455,31 @@ func (s *LtvService) BatchSaveLaunchConfig(ctx context.Context, platformCode str
 		}
 	}
 	return count, nil
+}
+
+// CalculateLtvStatsForUser 重新计算指定用户/平台的 LTV 统计，并级联重算 ALL 和主账号
+func (s *LtvService) CalculateLtvStatsForUser(ctx context.Context, platformCode string, userID int64) error {
+	pCode := strings.ToLower(strings.TrimSpace(platformCode))
+	if pCode == "" {
+		pCode = "all"
+	}
+	if userID <= 0 {
+		userID = 1
+	}
+
+	_ = s.CalculateLtvStatsForUserDirect(ctx, pCode, userID)
+	if pCode != "all" {
+		_ = s.CalculateLtvStatsForUserDirect(ctx, "all", userID)
+	}
+
+	// 级联所属主账号重算
+	if masters, err := s.userRepo.FindMasterUserIDs(ctx, userID); err == nil {
+		for _, mID := range masters {
+			_ = s.CalculateLtvStatsForUserDirect(ctx, pCode, mID)
+			_ = s.CalculateLtvStatsForUserDirect(ctx, "all", mID)
+		}
+	}
+	return nil
 }
 
 // CalculateAllLtvStats 计算所有用户的 LTV

@@ -9,18 +9,27 @@ import (
 
 	"go_backend/internal/model"
 	"go_backend/internal/pkg/timeutil"
-	"go_backend/internal/repository"
 	"go_backend/internal/service/engine"
 
 	"github.com/shopspring/decimal"
 )
 
+// BenchmarkRepository 抽象基准线及配置版本数据源接口
+type BenchmarkRepository interface {
+	FindBenchmarkCurve(ctx context.Context, dimType, dimValue string, periodDays int) ([]*model.LtvPredictBenchmark, error)
+	FindMatchingPagePeriodVersions(ctx context.Context, landingPageID string, periodDays int, launchTime time.Time) ([]*model.SubscriptionConfigVersion, error)
+	FindMatchingPlatformPeriodVersions(ctx context.Context, platformCode string, periodDays int, launchTime time.Time) ([]*model.SubscriptionConfigVersion, error)
+	FindMatchingPeriodVersions(ctx context.Context, periodDays int, launchTime time.Time) ([]*model.SubscriptionConfigVersion, error)
+	BatchUpsertBenchmarks(ctx context.Context, list []*model.LtvPredictBenchmark) error
+	DeleteBenchmarksByDim(ctx context.Context, dimType, dimValue string, periodDays int) error
+}
+
 type PredictService struct {
-	benchmarkRepo *repository.BenchmarkRepository
+	benchmarkRepo BenchmarkRepository
 	facade        *engine.LtvPredictFacade
 }
 
-func NewPredictService(benchmarkRepo *repository.BenchmarkRepository) *PredictService {
+func NewPredictService(benchmarkRepo BenchmarkRepository) *PredictService {
 	paybackEngine := engine.NewPaybackPredictEngine()
 	roiEngine := engine.NewRoiPredictEngine()
 	facade := engine.NewLtvPredictFacade(paybackEngine, roiEngine)
@@ -100,15 +109,16 @@ func (s *PredictService) PredictCohortDailyRechargeCurve(ctx context.Context, st
 	// 解析订阅周期分布
 	periodDistMap := s.parsePeriodDistribution(stat.SubPeriodDistribution, subPeriodDays, effectiveSubUserCount)
 	type periodCtx struct {
-		periodDays    int
-		userCount     int
-		baseRet       [367]float64
-		baseArpu      [367]float64
-		effectiveArpu float64
+		periodDays     int
+		userCount      int
+		configRenewUsd *float64
+		configFirstUsd *float64
+		baseRet        [367]float64
+		baseArpu       [367]float64
+		effectiveArpu  float64
 	}
 
 	contexts := make([]*periodCtx, 0, len(periodDistMap))
-	hasValidBenchmark := false
 
 	for period, count := range periodDistMap {
 		pCtx := &periodCtx{
@@ -116,11 +126,32 @@ func (s *PredictService) PredictCohortDailyRechargeCurve(ctx context.Context, st
 			userCount:  count,
 		}
 
-		// 查询基准线
-		benchmarks, _ := s.benchmarkRepo.FindBenchmarkCurve(ctx, dimType, dimValue, period)
-		if len(benchmarks) == 0 && dimType != "ALL" {
-			benchmarks, _ = s.benchmarkRepo.FindBenchmarkCurve(ctx, "ALL", "DEFAULT", period)
+		// 匹配价格版本 (工业级 3 级穿透兜底: 落地页维度精准绑定 > 平台维度匹配 > 全局确定性兜底)
+		var versions []*model.SubscriptionConfigVersion
+		if stat.DominantLandingPageID != "" {
+			versions, _ = s.benchmarkRepo.FindMatchingPagePeriodVersions(ctx, stat.DominantLandingPageID, period, launchTime)
 		}
+		if len(versions) == 0 && stat.PlatformCode != "" && !strings.EqualFold(stat.PlatformCode, "ALL") {
+			versions, _ = s.benchmarkRepo.FindMatchingPlatformPeriodVersions(ctx, stat.PlatformCode, period, launchTime)
+		}
+		if len(versions) == 0 {
+			versions, _ = s.benchmarkRepo.FindMatchingPeriodVersions(ctx, period, launchTime)
+		}
+
+		if len(versions) > 0 {
+			v := versions[0]
+			if v.RenewPriceCent > 0 {
+				renewVal := float64(v.RenewPriceCent) / 100.0
+				pCtx.configRenewUsd = &renewVal
+			}
+			if v.FirstPriceCent > 0 {
+				firstVal := float64(v.FirstPriceCent) / 100.0
+				pCtx.configFirstUsd = &firstVal
+			}
+		}
+
+		// 查询基准线 (对齐 Java 4 级回退策略)
+		benchmarks, _ := s.GetBenchmarkCurve(ctx, stat.PlatformCode, dimType, dimValue, period)
 
 		if len(benchmarks) > 0 {
 			for _, b := range benchmarks {
@@ -130,26 +161,33 @@ func (s *PredictService) PredictCohortDailyRechargeCurve(ctx context.Context, st
 					arpuVal, _ := b.BaseArpu.Float64()
 					pCtx.baseRet[idx] = retVal
 					pCtx.baseArpu[idx] = arpuVal
-					hasValidBenchmark = true
 				}
 			}
 		} else {
-			// 合成基准线兜底
-			unitPrice := engine.DefaultWeeklySubPrice
+			// 标准合成基准线兜底 (Synthetic Standard Benchmark Fallback)
+			defaultUnitPrice := engine.DefaultWeeklySubPrice
 			if period == 1 {
-				unitPrice = engine.DefaultDailySubPrice
+				defaultUnitPrice = engine.DefaultDailySubPrice
 			}
+			unitPrice := defaultUnitPrice
+			if pCtx.configRenewUsd != nil {
+				unitPrice = *pCtx.configRenewUsd
+			} else if pCtx.configFirstUsd != nil {
+				unitPrice = *pCtx.configFirstUsd
+			}
+
 			for d := 1; d <= 90; d++ {
 				if period > 1 {
 					if (d-1)%period == 0 {
 						cycleIdx := (d-1)/period + 1
 						pCtx.baseRet[d] = math.Pow(0.55, float64(cycleIdx-1))
+					} else {
+						pCtx.baseRet[d] = 0.0
 					}
 				} else {
 					pCtx.baseRet[d] = 1.0 / math.Pow(float64(d), 0.75)
 				}
 				pCtx.baseArpu[d] = unitPrice
-				hasValidBenchmark = true
 			}
 		}
 
@@ -176,23 +214,20 @@ func (s *PredictService) PredictCohortDailyRechargeCurve(ctx context.Context, st
 			}
 		}
 
-		// 匹配价格版本
-		versions, _ := s.benchmarkRepo.FindMatchingPeriodVersions(ctx, period, launchTime)
-		if len(versions) > 0 {
-			v := versions[0]
-			if v.RenewPriceCent > 0 {
-				pCtx.effectiveArpu = float64(v.RenewPriceCent) / 100.0
-			}
-		}
-		if pCtx.effectiveArpu <= 0 {
-			if period == 1 {
-				pCtx.effectiveArpu = engine.DefaultDailySubPrice
-			} else {
-				pCtx.effectiveArpu = engine.DefaultWeeklySubPrice
-			}
-		}
-
 		contexts = append(contexts, pCtx)
+	}
+
+	hasValidBenchmark := false
+	for _, pCtx := range contexts {
+		for d := 1; d <= 365; d++ {
+			if pCtx.baseRet[d] > 0 {
+				hasValidBenchmark = true
+				break
+			}
+		}
+		if hasValidBenchmark {
+			break
+		}
 	}
 
 	if !hasValidBenchmark {
@@ -203,16 +238,70 @@ func (s *PredictService) PredictCohortDailyRechargeCurve(ctx context.Context, st
 	}
 
 	actualRoi := actualRecharge / spendVal
+
+	// P2 模块 3：小样本强活跃大户特征识别与充值动量下界
 	continuityRatio := engine.GetRechargeContinuityRatio(stat, maxDays, 7)
 	isSmallCohortActive := (effectiveSubUserCount <= engine.SmallCohortMaxUsers &&
 		continuityRatio >= engine.SmallCohortContinuityThreshold &&
 		actualRoi >= engine.SmallCohortMinRoi && maxDays >= 10)
 
+	recentDailyVelocity := 0.0
+	if isSmallCohortActive && maxDays >= 7 {
+		rNow := engine.GetRechargeForDay(stat, maxDays)
+		r7Ago := engine.GetRechargeForDay(stat, maxDays-7)
+		rNowVal, _ := rNow.Float64()
+		r7AgoVal, _ := r7Ago.Float64()
+		if rNowVal-r7AgoVal > 0 {
+			recentDailyVelocity = (rNowVal - r7AgoVal) / 7.0
+		}
+	}
+
+	// P2 模块 1：Cohort 自身单客充值力 (Realized ARPU) 贝叶斯动态萃取
+	timeWeight := 0.0
+	if maxDays > 7 && maxDays <= 14 {
+		timeWeight = 0.10 + 0.40*(float64(maxDays-7)/7.0)
+	} else if maxDays > 14 {
+		timeWeight = 0.50 + 0.35*(math.Min(46.0, float64(maxDays-14))/46.0)
+	}
+	userWeight := float64(effectiveSubUserCount) / (float64(effectiveSubUserCount) + engine.ArpuShrinkageKUser)
+	arpuWeight := timeWeight * userWeight
+
+	for _, pCtx := range contexts {
+		retSum := 0.0
+		for d := 1; d <= maxDays; d++ {
+			retSum += pCtx.baseRet[d]
+		}
+		defaultFallback := engine.DefaultWeeklySubPrice
+		if pCtx.periodDays == 1 {
+			defaultFallback = engine.DefaultDailySubPrice
+		}
+		baseArpuAnchor := defaultFallback
+		if pCtx.configRenewUsd != nil {
+			baseArpuAnchor = *pCtx.configRenewUsd
+		} else if pCtx.baseArpu[maxDays] > 0 {
+			baseArpuAnchor = pCtx.baseArpu[maxDays]
+		}
+
+		if retSum > 0.01 && effectiveSubUserCount > 0 && arpuWeight > 0.001 {
+			realizedArpu := actualRecharge / (float64(effectiveSubUserCount) * retSum)
+			boundedRealizedArpu := math.Max(0.5*baseArpuAnchor, math.Min(8.0*baseArpuAnchor, realizedArpu))
+			pCtx.effectiveArpu = arpuWeight*boundedRealizedArpu + (1.0-arpuWeight)*baseArpuAnchor
+		} else {
+			pCtx.effectiveArpu = baseArpuAnchor
+		}
+	}
+
 	baseRoiSum := 0.0
 	for d := 1; d <= maxDays; d++ {
 		for _, pCtx := range contexts {
 			if pCtx.periodDays == 1 || (d-1)%pCtx.periodDays == 0 {
-				baseRoiSum += (pCtx.baseRet[d] * pCtx.effectiveArpu * float64(pCtx.userCount)) / spendVal
+				unitPrice := pCtx.baseArpu[d]
+				if d == 1 && pCtx.configFirstUsd != nil {
+					unitPrice = *pCtx.configFirstUsd
+				} else if d > 1 && pCtx.configRenewUsd != nil {
+					unitPrice = *pCtx.configRenewUsd
+				}
+				baseRoiSum += (pCtx.baseRet[d] * unitPrice * float64(pCtx.userCount)) / spendVal
 			}
 		}
 	}
@@ -228,8 +317,11 @@ func (s *PredictService) PredictCohortDailyRechargeCurve(ctx context.Context, st
 
 	currentCum := actualRecharge
 	for t := maxDays + 1; t <= 365; t++ {
+		// 1. 均值回归机制
 		scaleDecay := math.Pow(float64(maxDays)/float64(t), scaleDecayExp)
 		effectiveScaleFactor := 1.0 + (scaleFactor-1.0)*scaleDecay
+
+		// 2. 周期续订自然衰减校准
 		cycleDecay := 1.0
 		if t > 7 {
 			cycleDecay = math.Pow(7.0/float64(t), engine.CycleDecayExponent)
@@ -239,23 +331,41 @@ func (s *PredictService) PredictCohortDailyRechargeCurve(ctx context.Context, st
 		for _, pCtx := range contexts {
 			if pCtx.periodDays == 1 || (t-1)%pCtx.periodDays == 0 {
 				predRet := pCtx.baseRet[t] * effectiveScaleFactor * cycleDecay
-				dailyDelta += predRet * pCtx.effectiveArpu * float64(pCtx.userCount)
+				defaultArpu := pCtx.baseArpu[t]
+				if pCtx.configRenewUsd != nil {
+					defaultArpu = *pCtx.configRenewUsd
+				}
+				predArpu := defaultArpu
+				if arpuWeight > 0.001 && pCtx.effectiveArpu > 0 {
+					predArpu = pCtx.effectiveArpu
+				}
+				dailyDelta += predRet * predArpu * float64(pCtx.userCount)
 			}
 		}
+
+		if isSmallCohortActive && recentDailyVelocity > 0.01 {
+			velDecay := math.Pow(float64(maxDays)/float64(t), engine.SmallCohortScaleDecayExponent)
+			if recentDailyVelocity*velDecay > dailyDelta {
+				dailyDelta = recentDailyVelocity * velDecay
+			}
+		}
+
 		currentCum += dailyDelta
 		cumRecharge[t] = currentCum
 	}
 
-	// 成熟期 OLS 系综融合
+	// P2 模块 2：成熟期 (D14+) 双轨 OLS 动量动态系综融合 (Ensemble)
 	if maxDays >= engine.OlsEnsembleMinDays {
 		olsFit := engine.ComputeOlsFit(stat, maxDays)
 		if olsFit.Valid {
 			lambda := engine.ComputeOlsEnsembleWeight(olsFit.R2, maxDays)
-			for t := maxDays + 1; t <= 365; t++ {
-				predOlsRoi := olsFit.A*math.Log(float64(t)) + olsFit.B
-				predOlsRecharge := predOlsRoi * spendVal
-				if predOlsRecharge > cumRecharge[t] {
-					cumRecharge[t] = (1.0-lambda)*cumRecharge[t] + lambda*predOlsRecharge
+			if lambda > 0.001 {
+				baseRechargeAnchor := actualRecharge
+				for t := maxDays + 1; t <= 365; t++ {
+					predOlsRoi := olsFit.A*math.Log(float64(t)) + olsFit.B
+					predOlsRecharge := predOlsRoi * spendVal
+					effectiveOlsRecharge := math.Max(baseRechargeAnchor, predOlsRecharge)
+					cumRecharge[t] = (1.0-lambda)*cumRecharge[t] + lambda*effectiveOlsRecharge
 				}
 			}
 		}
@@ -296,7 +406,7 @@ func (s *PredictService) GetBenchmarkCurve(
 	if subPeriodDays <= 0 {
 		subPeriodDays = 1
 	}
-	pCode := strings.TrimSpace(platformCode)
+	pCode := strings.ToLower(strings.TrimSpace(platformCode))
 	dimType := strings.ToUpper(strings.TrimSpace(dimensionType))
 	dimVal := strings.TrimSpace(dimensionValue)
 	if dimType == "" {
@@ -306,18 +416,24 @@ func (s *PredictService) GetBenchmarkCurve(
 		dimVal = "DEFAULT"
 	}
 
-	// Level 1: (PLATFORM, platformCode, period)
 	var list []*model.LtvPredictBenchmark
-	if pCode != "" && !strings.EqualFold(pCode, "ALL") {
+
+	// Level 1: (PLATFORM_USER, platformCode + ":" + userId) if platformCode is specified and dimType is USER
+	if pCode != "" && !strings.EqualFold(pCode, "ALL") && dimType == "USER" {
+		list, _ = s.benchmarkRepo.FindBenchmarkCurve(ctx, "PLATFORM_USER", pCode+":"+dimVal, subPeriodDays)
+	}
+
+	// Level 2: (PLATFORM, platformCode) if platformCode is specified
+	if len(list) == 0 && pCode != "" && !strings.EqualFold(pCode, "ALL") {
 		list, _ = s.benchmarkRepo.FindBenchmarkCurve(ctx, "PLATFORM", pCode, subPeriodDays)
 	}
 
-	// Level 2: (USER, userId, period)
+	// Level 3: (USER, userId)
 	if len(list) == 0 && dimType == "USER" {
 		list, _ = s.benchmarkRepo.FindBenchmarkCurve(ctx, "USER", dimVal, subPeriodDays)
 	}
 
-	// Level 3: (ALL, DEFAULT, period)
+	// Level 4: (ALL, DEFAULT)
 	if len(list) == 0 {
 		list, _ = s.benchmarkRepo.FindBenchmarkCurve(ctx, "ALL", "DEFAULT", subPeriodDays)
 	}

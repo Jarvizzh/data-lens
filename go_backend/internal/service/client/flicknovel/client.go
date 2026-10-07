@@ -3,9 +3,13 @@ package flicknovel
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -21,9 +25,27 @@ type Client struct {
 }
 
 func NewClient(cfg *config.FlicknovelAPI) *Client {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   15 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+	}
+
 	return &Client{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		cfg:        cfg,
+		httpClient: &http.Client{
+			Transport: transport,
+			Timeout:   30 * time.Second,
+		},
+		cfg: cfg,
 	}
 }
 
@@ -60,9 +82,14 @@ func (c *Client) post(ctx context.Context, apiPath string, bodyObj interface{}, 
 	}
 
 	timestampStr := strconv.FormatInt(time.Now().Unix(), 10)
+	nonceBytes := make([]byte, 16)
+	_, _ = rand.Read(nonceBytes)
+	nonce := hex.EncodeToString(nonceBytes)
+
 	queryParams := map[string]string{
 		"company_id": c.cfg.CompanyID,
 		"timestamp":  timestampStr,
+		"nonce":      nonce,
 	}
 
 	sign, err := crypto.GenerateFlicknovelSign(queryParams, bodyJSON, c.cfg.PrivateKey)
@@ -113,11 +140,14 @@ func (c *Client) post(ctx context.Context, apiPath string, bodyObj interface{}, 
 
 // QueryPromotions 查询推广链接列表
 func (c *Client) QueryPromotions(ctx context.Context, req PromotionQueryRequest) (*PromotionQueryData, error) {
-	if req.DistAppID == 0 {
-		req.DistAppID = c.cfg.DefaultDistAppID
+	if req.Email == "" {
+		req.Email = c.cfg.DefaultEmail
+	}
+	if req.Page == 0 && req.PageIndex > 0 {
+		req.Page = int64(req.PageIndex)
 	}
 	var resp BaseResponse[PromotionQueryData]
-	err := c.post(ctx, "/dist_app/v1/promotion/query/", req, &resp)
+	err := c.post(ctx, "/open/promotion/query/v1", req, &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -129,11 +159,18 @@ func (c *Client) QueryPromotions(ctx context.Context, req PromotionQueryRequest)
 
 // QueryRechargeTemplates 查询充值模板
 func (c *Client) QueryRechargeTemplates(ctx context.Context, req RechargeTemplateQueryRequest) (*RechargeTemplateData, error) {
-	if req.DistAppID == 0 {
-		req.DistAppID = c.cfg.DefaultDistAppID
+	if req.DisAppID == 0 {
+		if req.DistAppID > 0 {
+			req.DisAppID = req.DistAppID
+		} else {
+			req.DisAppID = c.cfg.DefaultDistAppID
+		}
+	}
+	if req.Email == "" {
+		req.Email = c.cfg.DefaultEmail
 	}
 	var resp BaseResponse[RechargeTemplateData]
-	err := c.post(ctx, "/dist_app/v1/recharge_template/query/", req, &resp)
+	err := c.post(ctx, "/open/recharge_template/query/v1", req, &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -145,11 +182,8 @@ func (c *Client) QueryRechargeTemplates(ctx context.Context, req RechargeTemplat
 
 // QueryOrders 查询订单
 func (c *Client) QueryOrders(ctx context.Context, req OrderQueryRequest) (*OrderQueryData, error) {
-	if req.DistAppID == 0 {
-		req.DistAppID = c.cfg.DefaultDistAppID
-	}
 	var resp BaseResponse[OrderQueryData]
-	err := c.post(ctx, "/dist_app/v1/order/query/", req, &resp)
+	err := c.post(ctx, "/get_order_list/v1", req, &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -161,11 +195,8 @@ func (c *Client) QueryOrders(ctx context.Context, req OrderQueryRequest) (*Order
 
 // QueryRelations 查询染色归因
 func (c *Client) QueryRelations(ctx context.Context, req RelationQueryRequest) (*RelationQueryData, error) {
-	if req.DistAppID == 0 {
-		req.DistAppID = c.cfg.DefaultDistAppID
-	}
 	var resp BaseResponse[RelationQueryData]
-	err := c.post(ctx, "/dist_app/v1/relation/query/", req, &resp)
+	err := c.post(ctx, "/get_relation_list/v1", req, &resp)
 	if err != nil {
 		return nil, err
 	}

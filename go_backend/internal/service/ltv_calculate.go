@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -44,6 +46,7 @@ func (c *LtvCalculator) CalculateSingleCohort(
 	remark string,
 	maxToday time.Time,
 	tzMap map[string]string,
+	periodMap map[string]int,
 ) *model.LtvDailyStat {
 	stat := &model.LtvDailyStat{
 		PlatformCode: platformCode,
@@ -63,6 +66,7 @@ func (c *LtvCalculator) CalculateSingleCohort(
 	totalRefund := decimal.Zero
 	subMembersMap := make(map[string]struct{})
 
+	lpCountMap := make(map[string]int)
 	for _, o := range cohortOrders {
 		totalRecharge = totalRecharge.Add(o.OrderAmountUSD)
 		if o.RefundStatus == 2 {
@@ -71,7 +75,21 @@ func (c *LtvCalculator) CalculateSingleCohort(
 		if o.IsSubs == 1 && o.MemberID != "" {
 			subMembersMap[o.MemberID] = struct{}{}
 		}
+		pid := strings.TrimSpace(o.LandingPageID)
+		if pid != "" {
+			lpCountMap[pid]++
+		}
 	}
+
+	dominantLp := ""
+	maxLpCount := 0
+	for pid, cnt := range lpCountMap {
+		if cnt > maxLpCount {
+			maxLpCount = cnt
+			dominantLp = pid
+		}
+	}
+	stat.DominantLandingPageID = dominantLp
 
 	stat.TotalRecharge = totalRecharge
 	stat.TotalRefund = totalRefund
@@ -90,6 +108,44 @@ func (c *LtvCalculator) CalculateSingleCohort(
 	} else {
 		stat.SubUserCost = decimal.Zero
 	}
+
+	// 3.0 订阅周期分布与主导周期计算 (对齐 Java 算法)
+	detectedPeriod := 1
+	if len(subMembersMap) > 0 {
+		periodCountMap := make(map[int]int)
+		for mID := range subMembersMap {
+			if periodMap != nil {
+				if p, ok := periodMap[mID]; ok && p > 0 {
+					periodCountMap[p]++
+				}
+			}
+		}
+		if len(periodCountMap) > 0 {
+			var periods []int
+			for p := range periodCountMap {
+				periods = append(periods, p)
+			}
+			sort.Ints(periods)
+			maxCount := -1
+			for _, p := range periods {
+				cnt := periodCountMap[p]
+				if cnt > maxCount {
+					maxCount = cnt
+					detectedPeriod = p
+				}
+			}
+			var parts []string
+			for _, p := range periods {
+				parts = append(parts, fmt.Sprintf("\"%d\":%d", p, periodCountMap[p]))
+			}
+			stat.SubPeriodDistribution = "{" + strings.Join(parts, ",") + "}"
+		} else {
+			stat.SubPeriodDistribution = ""
+		}
+	} else {
+		stat.SubPeriodDistribution = ""
+	}
+	stat.SubPeriodDays = detectedPeriod
 
 	// 2. 7日与15日留存
 	day8DateStr := launchDate.AddDate(0, 0, 7).Format(timeutil.DateLayout)
@@ -110,6 +166,9 @@ func (c *LtvCalculator) CalculateSingleCohort(
 			r7 := decimal.NewFromInt(int64(c7)).DivRound(decimal.NewFromInt(int64(subUserCount)), 4)
 			stat.Day7SubUserRetention = &r7
 		}
+	} else {
+		stat.Day7SubUserCount = nil
+		stat.Day7SubUserRetention = nil
 	}
 
 	day16DateStr := launchDate.AddDate(0, 0, 15).Format(timeutil.DateLayout)
@@ -129,13 +188,18 @@ func (c *LtvCalculator) CalculateSingleCohort(
 			r15 := decimal.NewFromInt(int64(c15)).DivRound(decimal.NewFromInt(int64(subUserCount)), 4)
 			stat.Day15SubUserRetention = &r15
 		}
+	} else {
+		stat.Day15SubUserCount = nil
+		stat.Day15SubUserRetention = nil
 	}
 
-	// 3. Day 1 ~ Day 60 充值与 ROI 计算
+	// 3. Day 1 ~ Day 60 充值与 ROI 计算 (未到达天数置为 nil，序列化输出为 null)
 	for day := 1; day <= 60; day++ {
 		targetDateStr := launchDate.AddDate(0, 0, day-1).Format(timeutil.DateLayout)
 		if targetDateStr > maxTodayStr {
-			break
+			stat.SetRechargeForDay(day, nil)
+			stat.SetRoiForDay(day, nil)
+			continue
 		}
 
 		dayCumRecharge := decimal.Zero
@@ -146,9 +210,12 @@ func (c *LtvCalculator) CalculateSingleCohort(
 			}
 		}
 
-		stat.SetRechargeForDay(day, dayCumRecharge)
+		stat.SetRechargeForDay(day, &dayCumRecharge)
 		if spend.GreaterThan(decimal.Zero) {
-			stat.SetRoiForDay(day, dayCumRecharge.DivRound(spend, 4))
+			roi := dayCumRecharge.DivRound(spend, 4)
+			stat.SetRoiForDay(day, &roi)
+		} else {
+			stat.SetRoiForDay(day, nil)
 		}
 	}
 
@@ -167,14 +234,7 @@ func (c *LtvCalculator) CalculateSingleCohort(
 }
 
 func (c *LtvCalculator) GetLaunchStartDateForPlatform(platformCode string) string {
-	switch strings.ToLower(platformCode) {
-	case "flicknovel":
-		return "2026-09-16"
-	case "rocnovel":
-		return "2026-07-10"
-	default:
-		return "2026-07-10"
-	}
+	return model.GetLaunchStartDateForPlatform(platformCode)
 }
 
 func formatDate10(s string) string {
@@ -280,3 +340,82 @@ func GetEffectivePayDate(o *model.RawOrder, tzMap map[string]string) string {
 	}
 	return formatDate10(res)
 }
+
+// GetUtcPayDate 提取订单的 UTC 支付日期 (对应 Java LtvStatService.getUtcPayDate)
+func GetUtcPayDate(o *model.RawOrder) string {
+	if o == nil {
+		return ""
+	}
+	if o.PayDateUTC != "" {
+		return formatDate10(o.PayDateUTC)
+	}
+	if o.PayTimeUTC != nil && !o.PayTimeUTC.IsZero() {
+		return o.PayTimeUTC.UTC().Format(timeutil.DateLayout)
+	}
+	if !o.PayTimeBJ.IsZero() {
+		return o.PayTimeBJ.Add(-8 * time.Hour).Format(timeutil.DateLayout)
+	}
+	return formatDate10(o.PayDateET)
+}
+
+// GetUtcRegisterDate 提取订单的 UTC 注册日期 (对应 Java LtvStatService.getUtcRegisterDate)
+func GetUtcRegisterDate(o *model.RawOrder) string {
+	if o == nil {
+		return ""
+	}
+	if o.RegisterDateUTC != "" {
+		return formatDate10(o.RegisterDateUTC)
+	}
+	if o.RegisterTimeUTC != nil && !o.RegisterTimeUTC.IsZero() {
+		return o.RegisterTimeUTC.UTC().Format(timeutil.DateLayout)
+	}
+	if !o.RegisterTimeBJ.IsZero() {
+		return o.RegisterTimeBJ.Add(-8 * time.Hour).Format(timeutil.DateLayout)
+	}
+	return formatDate10(o.RegisterDateET)
+}
+
+// GetBjPayDate 提取订单的北京时间支付日期 (每日充值分析使用，对应 Java LtvStatService.getBjPayDate)
+func GetBjPayDate(o *model.RawOrder) string {
+	if o == nil {
+		return ""
+	}
+	if !o.PayTimeBJ.IsZero() {
+		return o.PayTimeBJ.In(timeutil.BeijingZone).Format(timeutil.DateLayout)
+	}
+	return formatDate10(o.PayDateET)
+}
+
+// GetBjRegisterDate 提取订单的北京时间注册日期 (每日充值分析使用，对应 Java LtvStatService.getBjRegisterDate)
+func GetBjRegisterDate(o *model.RawOrder) string {
+	if o == nil {
+		return ""
+	}
+	if !o.RegisterTimeBJ.IsZero() {
+		return o.RegisterTimeBJ.In(timeutil.BeijingZone).Format(timeutil.DateLayout)
+	}
+	return formatDate10(o.RegisterDateET)
+}
+
+// GetOrderPayDateForPlatform 专用于每日充值分析：flicknovel 用 UTC，其他平台用北京时间 (对应 Java DailyRechargeStatService.getOrderPayDateForPlatform)
+func GetOrderPayDateForPlatform(platformCode string, o *model.RawOrder) string {
+	if o == nil {
+		return ""
+	}
+	if strings.EqualFold(platformCode, "flicknovel") || strings.EqualFold(o.PlatformCode, "flicknovel") {
+		return GetUtcPayDate(o)
+	}
+	return GetBjPayDate(o)
+}
+
+// GetOrderRegisterDateForPlatform 专用于每日充值分析：flicknovel 用 UTC，其他平台用北京时间 (对应 Java DailyRechargeStatService.getOrderRegisterDateForPlatform)
+func GetOrderRegisterDateForPlatform(platformCode string, o *model.RawOrder) string {
+	if o == nil {
+		return ""
+	}
+	if strings.EqualFold(platformCode, "flicknovel") || strings.EqualFold(o.PlatformCode, "flicknovel") {
+		return GetUtcRegisterDate(o)
+	}
+	return GetBjRegisterDate(o)
+}
+

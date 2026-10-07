@@ -17,6 +17,7 @@ type TaskScheduler struct {
 	syncMgr     *service.SyncManager
 	ltvSvc      *service.LtvService
 	rechargeSvc *service.RechargeStatService
+	userSvc     *service.UserService
 	cache       *service.LtvMemoryCache
 	logger      *zap.Logger
 }
@@ -25,6 +26,7 @@ func NewTaskScheduler(
 	syncMgr *service.SyncManager,
 	ltvSvc *service.LtvService,
 	rechargeSvc *service.RechargeStatService,
+	userSvc *service.UserService,
 	cache *service.LtvMemoryCache,
 	logger *zap.Logger,
 ) *TaskScheduler {
@@ -34,6 +36,7 @@ func NewTaskScheduler(
 		syncMgr:     syncMgr,
 		ltvSvc:      ltvSvc,
 		rechargeSvc: rechargeSvc,
+		userSvc:     userSvc,
 		cache:       cache,
 		logger:      logger,
 	}
@@ -42,18 +45,23 @@ func NewTaskScheduler(
 func (s *TaskScheduler) Start() error {
 	ctx := context.Background()
 
-	// 1. 每 4 小时整点: 拉取番茄司南所有推广链接与充值模板
+	// 1. 每 4 小时整点: 拉取番茄司南所有推广链接与充值模板，并自动导入全量推广ID给管理员
 	_, err := s.cron.AddFunc("0 */4 * * *", func() {
 		s.logger.Info("Starting scheduled Flicknovel promotions & templates sync (every 4h)...")
 		if err := s.syncMgr.SyncFlicknovelPromotionsAndTemplates(ctx); err != nil {
 			s.logger.Error("Scheduled Flicknovel promotions sync failed", zap.Error(err))
+		}
+		if s.userSvc != nil {
+			if count, err := s.userSvc.AutoImportFlicknovelLandingPagesForAdmins(ctx); err == nil && count > 0 {
+				s.logger.Info("Scheduled Flicknovel admin landing page auto-import completed", zap.Int("imported", count))
+			}
 		}
 	})
 	if err != nil {
 		return fmt.Errorf("register cron job 1 failed: %w", err)
 	}
 
-	// 2. 每小时 05 分: 拉取过去 2 天全量增量订单
+	// 2. 每小时 05 分: 拉取过去 2 天全量增量订单与染色归因
 	_, err = s.cron.AddFunc("5 * * * *", func() {
 		s.logger.Info("Starting scheduled order fetch at xx:05 BJ Time (past 2 days)...")
 		today := time.Now().In(timeutil.BeijingZone)
@@ -62,17 +70,30 @@ func (s *TaskScheduler) Start() error {
 		if err := s.syncMgr.SyncOrdersAllPlatforms(ctx, start, end); err != nil {
 			s.logger.Error("Scheduled order fetch failed", zap.Error(err))
 		}
+		if _, err := s.syncMgr.SyncFlicknovelRelations(ctx, start, end); err != nil {
+			s.logger.Error("Scheduled Flicknovel relations fetch failed", zap.Error(err))
+		}
 	})
 	if err != nil {
 		return fmt.Errorf("register cron job 2 failed: %w", err)
 	}
 
-	// 3. 每天凌晨 00:40: 全量拉取历史订单
+	// 3. 每天凌晨 00:40: 全量拉取历史订单与染色归因
 	_, err = s.cron.AddFunc("40 0 * * *", func() {
 		s.logger.Info("Starting daily full order fetch at 00:40 BJ Time...")
-		today := time.Now().In(timeutil.BeijingZone).Format(timeutil.DateLayout)
-		if err := s.syncMgr.SyncOrdersAllPlatforms(ctx, "2026-07-10", today); err != nil {
+		today := time.Now().In(timeutil.BeijingZone)
+		todayStr := today.Format(timeutil.DateLayout)
+		if err := s.syncMgr.SyncOrdersAllPlatforms(ctx, "2026-07-10", todayStr); err != nil {
 			s.logger.Error("Daily full order fetch failed", zap.Error(err))
+		}
+		relStart := today.AddDate(0, 0, -30).Format(timeutil.DateLayout)
+		if _, err := s.syncMgr.SyncFlicknovelRelations(ctx, relStart, todayStr); err != nil {
+			s.logger.Error("Scheduled Flicknovel full relations fetch failed", zap.Error(err))
+		}
+		if s.userSvc != nil {
+			if count, err := s.userSvc.AutoImportFlicknovelLandingPagesForAdmins(ctx); err == nil && count > 0 {
+				s.logger.Info("Daily full admin landing page auto-import completed", zap.Int("imported", count))
+			}
 		}
 	})
 	if err != nil {

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"strings"
 	"time"
 )
 
@@ -20,6 +21,70 @@ type PlatformConfig struct {
 
 func (PlatformConfig) TableName() string { return "platform_config" }
 
+// Platform 常量与枚举定义 (强类型，严禁在业务逻辑与数据接入层使用魔术字符串)
+const (
+	PlatformAll        = "ALL"
+	PlatformRocnovel   = "rocnovel"
+	PlatformFlicknovel = "flicknovel"
+
+	CstDefaultTimezone = "CST"
+	UtcDefaultTimezone = "UTC"
+
+	LaunchStartDateRocnovel   = "2026-07-10"
+	LaunchStartDateFlicknovel = "2026-09-16"
+)
+
+// PlatformInfo 平台元数据
+type PlatformInfo struct {
+	Code            string
+	DisplayName     string
+	Enabled         bool
+	LaunchStartDate string
+	DefaultTimezone string
+}
+
+var SupportedPlatforms = map[string]PlatformInfo{
+	"all": {
+		Code:            PlatformAll,
+		DisplayName:     "大盘汇总",
+		Enabled:         true,
+		LaunchStartDate: LaunchStartDateRocnovel,
+		DefaultTimezone: CstDefaultTimezone,
+	},
+	"rocnovel": {
+		Code:            PlatformRocnovel,
+		DisplayName:     "中文在线",
+		Enabled:         true,
+		LaunchStartDate: LaunchStartDateRocnovel,
+		DefaultTimezone: CstDefaultTimezone,
+	},
+	"flicknovel": {
+		Code:            PlatformFlicknovel,
+		DisplayName:     "番茄司南",
+		Enabled:         true,
+		LaunchStartDate: LaunchStartDateFlicknovel,
+		DefaultTimezone: UtcDefaultTimezone,
+	},
+}
+
+// GetLaunchStartDateForPlatform 根据平台代码安全获取投放起始日期，若未指定或无法匹配默认返回 ROCNOVEL (2026-07-10)
+func GetLaunchStartDateForPlatform(code string) string {
+	c := strings.ToLower(strings.TrimSpace(code))
+	if p, ok := SupportedPlatforms[c]; ok {
+		return p.LaunchStartDate
+	}
+	return LaunchStartDateRocnovel
+}
+
+// GetDefaultTimezoneForPlatform 根据平台代码安全获取默认时区
+func GetDefaultTimezoneForPlatform(code string) string {
+	c := strings.ToLower(strings.TrimSpace(code))
+	if p, ok := SupportedPlatforms[c]; ok {
+		return p.DefaultTimezone
+	}
+	return CstDefaultTimezone
+}
+
 // PlatformItemDto 前端下拉选项与元数据传输对象
 type PlatformItemDto struct {
 	Code            string `json:"code"`
@@ -27,3 +92,4 @@ type PlatformItemDto struct {
 	Enabled         bool   `json:"enabled"`
 	LaunchStartDate string `json:"launchStartDate"`
 }
+
