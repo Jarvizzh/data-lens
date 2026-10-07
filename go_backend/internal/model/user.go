@@ -1,8 +1,23 @@
 package model
 
 import (
+	"strings"
 	"time"
 )
+
+// 用户角色与状态常量 (严禁在鉴权与业务层使用魔术字符串/数字)
+const (
+	RoleSuperAdmin = "SUPER_ADMIN"
+	RoleAdmin      = "ADMIN"
+	RoleUser       = "USER"
+
+	UserStatusActive   = 1
+	UserStatusDisabled = 0
+
+	UserIsMasterYes = 1
+	UserIsMasterNo  = 0
+)
+
 
 // SysUser 系统用户表
 type SysUser struct {
@@ -25,6 +40,31 @@ type SysUser struct {
 }
 
 func (SysUser) TableName() string { return "sys_user" }
+
+// IsAdmin 判断用户是否具有管理员或超级管理员权限
+func (u *SysUser) IsAdmin() bool {
+	if u == nil {
+		return false
+	}
+	return strings.EqualFold(u.Role, RoleAdmin) || strings.EqualFold(u.Role, RoleSuperAdmin)
+}
+
+// IsSuperAdmin 判断用户是否为超级管理员
+func (u *SysUser) IsSuperAdmin() bool {
+	if u == nil {
+		return false
+	}
+	return strings.EqualFold(u.Role, RoleSuperAdmin)
+}
+
+// IsActive 判断用户是否处于启用状态
+func (u *SysUser) IsActive() bool {
+	if u == nil {
+		return false
+	}
+	return u.Status == UserStatusActive
+}
+
 
 // UserSubAccount 主账号与子账号绑定关联表
 type UserSubAccount struct {

@@ -23,6 +23,7 @@ type LtvService struct {
 	predictSvc        *PredictService
 	cache             *LtvMemoryCache
 	monthlySummarySvc *MonthlySummaryService
+	rechargeDistSvc   *DailyDistributionService
 }
 
 func NewLtvService(
@@ -45,6 +46,10 @@ func NewLtvService(
 		cache:             cache,
 		monthlySummarySvc: monthlySummarySvc,
 	}
+}
+
+func (s *LtvService) SetRechargeDistService(distSvc *DailyDistributionService) {
+	s.rechargeDistSvc = distSvc
 }
 
 // GetLtvListResponse 兼容 Java 强类型 /api/ltv/list
@@ -256,7 +261,7 @@ func (s *LtvService) CalculateLtvStatsForUserDirect(ctx context.Context, platfor
 					cleanRemark := strings.TrimSpace(sc.Remark)
 					if cleanRemark != "" {
 						formatted := cleanRemark
-						if lDate >= "2026-09-16" {
+						if lDate >= model.LaunchStartDateFlicknovel {
 							formatted = formatPlatformRemark(sc.PlatformCode, cleanRemark)
 						}
 						rList := remarkMap[lDate]
@@ -311,7 +316,7 @@ func (s *LtvService) CalculateLtvStatsForUserDirect(ctx context.Context, platfor
 					cleanRemark := strings.TrimSpace(c.Remark)
 					if cleanRemark != "" {
 						formatted := cleanRemark
-						if lDate >= "2026-09-16" {
+						if lDate >= model.LaunchStartDateFlicknovel {
 							formatted = formatPlatformRemark(c.PlatformCode, cleanRemark)
 						}
 						rList := remarkMap[lDate]
@@ -414,13 +419,9 @@ func (s *LtvService) SaveLaunchConfig(ctx context.Context, req dto.SaveLaunchCon
 	_ = s.CalculateLtvStatsForUserDirect(ctx, req.PlatformCode, req.UserID)
 	_ = s.CalculateLtvStatsForUserDirect(ctx, "all", req.UserID)
 
-	// 触发关联主账号重算
-	if masters, err := s.userRepo.FindMasterUserIDs(ctx, req.UserID); err == nil {
-		for _, mID := range masters {
-			_ = s.CalculateLtvStatsForUserDirect(ctx, req.PlatformCode, mID)
-			_ = s.CalculateLtvStatsForUserDirect(ctx, "all", mID)
-		}
-	}
+	// 异步触发所属父级主账号的 LTV 报表与每日充值分布报表重算 (goroutine 异步执行，不阻塞当前 HTTP 请求)
+	s.asyncRecalculateMastersForSubUser(req.PlatformCode, req.UserID)
+
 	return nil
 }
 
@@ -447,13 +448,9 @@ func (s *LtvService) BatchSaveLaunchConfig(ctx context.Context, platformCode str
 	_ = s.CalculateLtvStatsForUserDirect(ctx, pCode, userID)
 	_ = s.CalculateLtvStatsForUserDirect(ctx, "all", userID)
 
-	// 触发关联主账号重算
-	if masters, err := s.userRepo.FindMasterUserIDs(ctx, userID); err == nil {
-		for _, mID := range masters {
-			_ = s.CalculateLtvStatsForUserDirect(ctx, pCode, mID)
-			_ = s.CalculateLtvStatsForUserDirect(ctx, "all", mID)
-		}
-	}
+	// 异步触发所属父级主账号的 LTV 报表与每日充值分布报表重算 (goroutine 异步执行，不阻塞当前 HTTP 请求)
+	s.asyncRecalculateMastersForSubUser(pCode, userID)
+
 	return count, nil
 }
 
@@ -472,14 +469,40 @@ func (s *LtvService) CalculateLtvStatsForUser(ctx context.Context, platformCode 
 		_ = s.CalculateLtvStatsForUserDirect(ctx, "all", userID)
 	}
 
-	// 级联所属主账号重算
-	if masters, err := s.userRepo.FindMasterUserIDs(ctx, userID); err == nil {
-		for _, mID := range masters {
-			_ = s.CalculateLtvStatsForUserDirect(ctx, pCode, mID)
-			_ = s.CalculateLtvStatsForUserDirect(ctx, "all", mID)
-		}
-	}
+	// 异步触发所属主账号的报表重算 (对齐 Java asyncRecalculateService.asyncRecalculateMastersForSubUser)
+	s.asyncRecalculateMastersForSubUser(pCode, userID)
+
 	return nil
+}
+
+// asyncRecalculateMastersForSubUser 异步触发子账号关联的所有父级主账号进行报表重算 (LTV 报表 + 每日充值分布报表)
+func (s *LtvService) asyncRecalculateMastersForSubUser(platformCode string, subUserID int64) {
+	if subUserID <= 0 {
+		return
+	}
+	go func(pCode string, subUID int64) {
+		bgCtx := context.Background()
+		masters, err := s.userRepo.FindMasterUserIDs(bgCtx, subUID)
+		if err != nil || len(masters) == 0 {
+			return
+		}
+
+		for _, mID := range masters {
+			// 1. 级联重算所属父级主账号的 LTV 报表 (当前平台 + ALL 平台)
+			_ = s.CalculateLtvStatsForUserDirect(bgCtx, pCode, mID)
+			_ = s.CalculateLtvStatsForUserDirect(bgCtx, "all", mID)
+
+			// 2. 级联重算所属父级主账号的每日充值分布报表 (当前平台 + ALL 平台)
+			if s.rechargeDistSvc != nil {
+				_ = s.rechargeDistSvc.CalculateDailyDistributionForUser(bgCtx, pCode, mID)
+				_ = s.rechargeDistSvc.CalculateDailyDistributionForUser(bgCtx, "all", mID)
+			}
+
+			// 3. 清理缓存
+			s.cache.Delete(fmt.Sprintf("%s:%d", pCode, mID))
+			s.cache.Delete(fmt.Sprintf("all:%d", mID))
+		}
+	}(platformCode, subUserID)
 }
 
 // CalculateAllLtvStats 计算所有用户的 LTV
@@ -488,7 +511,7 @@ func (s *LtvService) CalculateAllLtvStats(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	platforms := []string{"all", "rocnovel", "flicknovel"}
+	platforms := []string{model.PlatformAll, model.PlatformRocnovel, model.PlatformFlicknovel}
 	for _, u := range users {
 		for _, p := range platforms {
 			_ = s.CalculateLtvStatsForUserDirect(ctx, p, u.ID)
@@ -511,10 +534,10 @@ func formatPlatformRemark(platformCode, rawRemark string) string {
 		return ""
 	}
 	pName := platformCode
-	switch strings.ToLower(platformCode) {
-	case "rocnovel":
+	switch strings.ToLower(strings.TrimSpace(platformCode)) {
+	case model.PlatformRocnovel:
 		pName = "洛奇小说"
-	case "flicknovel":
+	case model.PlatformFlicknovel:
 		pName = "番茄司南"
 	}
 	prefix := pName + "："

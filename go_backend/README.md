@@ -61,14 +61,33 @@ cd go_backend
 go test -v ./...
 ```
 
-### 2. 编译可执行文件
+### 2. 本地开发编译
 ```bash
 cd go_backend
 go build -o server cmd/server/main.go
 ```
 
-### 3. 启动服务
+### 3. 本地启动服务
 ```bash
 ./server
 ```
 服务将在 `8080` 端口监听并启动定时调度器。
+
+---
+
+## 四、 生产环境构建与上线部署
+
+已针对 **Alibaba Cloud Linux 3** 提供一键交叉编译脚本、极简轻量 Dockerfile 及完整部署说明：
+
+1. **一键构建 Linux 静态二进制包**：
+   ```bash
+   cd go_backend
+   ./build_linux.sh amd64
+   ```
+   输出纯静态可执行文件 `server` (24MB) 与发布压缩包 `ltv-server-linux-amd64.tar.gz` (8.9MB)。
+
+2. **详细线上部署指引**：
+   请参阅 [DEPLOY.md](DEPLOY.md)，包含：
+   - Docker / Docker Compose 容器秒级构建与一键运行步骤（生产环境默认监听 8098 端口）；
+   - Nginx 反向代理配置与健康检查；
+   - 容器镜像版本升级与快速回滚方案。

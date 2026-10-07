@@ -37,7 +37,7 @@ func (h *SettlementHandler) checkPermission(c *gin.Context) bool {
 		response.Unauthorized(c, "未登录")
 		return false
 	}
-	if strings.EqualFold(u.Role, "SUPER_ADMIN") {
+	if u.IsSuperAdmin() {
 		return true
 	}
 	if h.userRepo != nil {
@@ -77,7 +77,7 @@ func (h *SettlementHandler) GetList(c *gin.Context) {
 	settlementType := c.DefaultQuery("settlementType", "PLATFORM_ALL")
 	var targetUserID *int64
 
-	isAdmin := strings.EqualFold(u.Role, "ADMIN") || strings.EqualFold(u.Role, "SUPER_ADMIN")
+	isAdmin := u.IsAdmin()
 	if !isAdmin {
 		settlementType = "USER_ACCOUNT"
 		targetUserID = &u.UserID
@@ -114,7 +114,7 @@ func (h *SettlementHandler) SaveConfig(c *gin.Context) {
 		return
 	}
 
-	isAdmin := strings.EqualFold(u.Role, "ADMIN") || strings.EqualFold(u.Role, "SUPER_ADMIN")
+	isAdmin := u.IsAdmin()
 	if !isAdmin {
 		req.SettlementType = "USER_ACCOUNT"
 		req.TargetUserID = &u.UserID

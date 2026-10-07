@@ -251,9 +251,9 @@ func GetEffectiveRegisterDate(o *model.RawOrder, tzMap map[string]string) string
 		return ""
 	}
 	pid := strings.TrimSpace(o.LandingPageID)
-	defaultTz := "CST"
-	if strings.EqualFold(o.PlatformCode, "flicknovel") {
-		defaultTz = "UTC"
+	defaultTz := model.CstDefaultTimezone
+	if model.IsFlicknovel(o.PlatformCode) {
+		defaultTz = model.UtcDefaultTimezone
 	}
 	tz := defaultTz
 	if tzMap != nil && pid != "" {
@@ -299,9 +299,9 @@ func GetEffectivePayDate(o *model.RawOrder, tzMap map[string]string) string {
 		return ""
 	}
 	pid := strings.TrimSpace(o.LandingPageID)
-	defaultTz := "CST"
-	if strings.EqualFold(o.PlatformCode, "flicknovel") {
-		defaultTz = "UTC"
+	defaultTz := model.CstDefaultTimezone
+	if model.IsFlicknovel(o.PlatformCode) {
+		defaultTz = model.UtcDefaultTimezone
 	}
 	tz := defaultTz
 	if tzMap != nil && pid != "" {
@@ -402,7 +402,7 @@ func GetOrderPayDateForPlatform(platformCode string, o *model.RawOrder) string {
 	if o == nil {
 		return ""
 	}
-	if strings.EqualFold(platformCode, "flicknovel") || strings.EqualFold(o.PlatformCode, "flicknovel") {
+	if model.IsFlicknovel(platformCode) || model.IsFlicknovel(o.PlatformCode) {
 		return GetUtcPayDate(o)
 	}
 	return GetBjPayDate(o)
@@ -413,7 +413,7 @@ func GetOrderRegisterDateForPlatform(platformCode string, o *model.RawOrder) str
 	if o == nil {
 		return ""
 	}
-	if strings.EqualFold(platformCode, "flicknovel") || strings.EqualFold(o.PlatformCode, "flicknovel") {
+	if model.IsFlicknovel(platformCode) || model.IsFlicknovel(o.PlatformCode) {
 		return GetUtcRegisterDate(o)
 	}
 	return GetBjRegisterDate(o)

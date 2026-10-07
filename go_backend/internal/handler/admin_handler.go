@@ -2,9 +2,9 @@ package handler
 
 import (
 	"strconv"
-	"strings"
 
 	"go_backend/internal/middleware"
+	"go_backend/internal/model"
 	"go_backend/internal/pkg/response"
 	"go_backend/internal/service"
 	"go_backend/internal/service/dto"
@@ -32,7 +32,7 @@ func NewAdminHandler(
 
 func (h *AdminHandler) checkSuperAdmin(c *gin.Context) bool {
 	u := middleware.GetCurrentUser(c)
-	if u == nil || !strings.EqualFold(u.Role, "SUPER_ADMIN") {
+	if !u.IsSuperAdmin() {
 		response.Error(c, 403, "无权访问，仅超级管理员可管理用户")
 		return false
 	}
@@ -84,8 +84,8 @@ func (h *AdminHandler) ListUsers(c *gin.Context) {
 		subIDs, _ := h.permSvc.GetSubUserIDsForMaster(c.Request.Context(), u.ID)
 
 		platforms := u.AllowedPlatforms
-		if strings.EqualFold(u.Role, "SUPER_ADMIN") {
-			platforms = "ALL"
+		if u.IsSuperAdmin() {
+			platforms = model.PlatformAll
 		}
 
 		result = append(result, UserInfoDto{
@@ -331,9 +331,9 @@ func (h *AdminHandler) UpdateLandingPages(c *gin.Context) {
 	}
 	_ = c.ShouldBindJSON(&body)
 
-	pCode := body.PlatformCode
-	if pCode == "" {
-		pCode = "rocnovel"
+	pCode := model.NormalizePlatform(body.PlatformCode)
+	if pCode == model.PlatformAll {
+		pCode = model.PlatformRocnovel
 	}
 	items := body.LandingPages
 	if len(items) == 0 && len(body.LandingPageIDs) > 0 {
@@ -341,7 +341,7 @@ func (h *AdminHandler) UpdateLandingPages(c *gin.Context) {
 			items = append(items, dto.LandingPageConfigItem{
 				PlatformCode:  pCode,
 				LandingPageID: lpid,
-				Timezone:      "CST",
+				Timezone:      model.CstDefaultTimezone,
 			})
 		}
 	}

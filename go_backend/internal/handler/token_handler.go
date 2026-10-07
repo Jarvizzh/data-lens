@@ -26,7 +26,7 @@ func NewTokenHandler(rocnovelClient *rocnovel.Client, platformRepo *repository.P
 
 func (h *TokenHandler) GetToken(c *gin.Context) {
 	u := middleware.GetCurrentUser(c)
-	if u == nil || !strings.EqualFold(u.Role, "SUPER_ADMIN") {
+	if !u.IsSuperAdmin() {
 		response.Error(c, 403, "无权访问，API 设置仅超级管理员可见")
 		return
 	}
@@ -51,7 +51,7 @@ func (h *TokenHandler) GetToken(c *gin.Context) {
 
 func (h *TokenHandler) UpdateToken(c *gin.Context) {
 	u := middleware.GetCurrentUser(c)
-	if u == nil || !strings.EqualFold(u.Role, "SUPER_ADMIN") {
+	if !u.IsSuperAdmin() {
 		response.Error(c, 403, "无权访问，API 设置仅超级管理员可见")
 		return
 	}

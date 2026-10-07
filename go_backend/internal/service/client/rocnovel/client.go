@@ -83,6 +83,57 @@ type OrderReportRecord struct {
 	RefundStatus    int    `json:"refundStatus"`   // 0-未退款, 1-部分退款, 2-已退款
 }
 
+type LandingPageRecordDto struct {
+	ID                  string `json:"id"`
+	Name                string `json:"name"`
+	ContentID           string `json:"contentId"`
+	ContentName         string `json:"contentName"`
+	SaleComboID         string `json:"saleComboId"`
+	SaleComboName       string `json:"saleComboName"`
+	SubscribeConfigID   string `json:"subscribeConfigId"`
+	SubscribeConfigName string `json:"subscribeConfigName"`
+	CreateDateTime      string `json:"createDateTime"`
+	UpdateDateTime      string `json:"updateDateTime"`
+}
+
+type LandingPageConfigResponseDto struct {
+	Code int `json:"code"`
+	Msg  string `json:"msg"`
+	Data *struct {
+		Current int                    `json:"current"`
+		Pages   int                    `json:"pages"`
+		Size    int                    `json:"size"`
+		Total   int                    `json:"total"`
+		Records []LandingPageRecordDto `json:"records"`
+	} `json:"data"`
+}
+
+type SubscribeConfigProductRecordDto struct {
+	ID                string `json:"id"`
+	ConfigID          string `json:"configId"`
+	Name              string `json:"name"`
+	Cycle             int    `json:"cycle"`
+	CycleStr          string `json:"cycleStr"`
+	PreferentialPrice string `json:"preferentialPrice"`
+	Price             string `json:"price"`
+	Status            int    `json:"status"`
+	Deleted           int    `json:"deleted"`
+	CreateDateTime    string `json:"createDateTime"`
+	UpdateDateTime    string `json:"updateDateTime"`
+}
+
+type SubscribeConfigProductResponseDto struct {
+	Code int `json:"code"`
+	Msg  string `json:"msg"`
+	Data *struct {
+		Current int                                `json:"current"`
+		Pages   int                                `json:"pages"`
+		Size    int                                `json:"size"`
+		Total   int                                `json:"total"`
+		Records []SubscribeConfigProductRecordDto `json:"records"`
+	} `json:"data"`
+}
+
 func (c *Client) FetchOrdersPage(ctx context.Context, pageIndex, pageSize int, startTime, endTime, pID, auth, cookie string) (*OrderReportData, error) {
 	reqBody := OrderReportRequest{
 		ContentType:   4,
@@ -191,3 +242,111 @@ func (c *Client) FetchOrdersPage(ctx context.Context, pageIndex, pageSize int, s
 
 	return res.Data, nil
 }
+
+// FetchLandingPagesPage 查询中文在线落地页列表
+func (c *Client) FetchLandingPagesPage(ctx context.Context, pageIndex, pageSize int, auth, cookie string) (*LandingPageConfigResponseDto, error) {
+	clientGroupID := c.cfg.ClientGroupID
+	if clientGroupID == "" {
+		clientGroupID = "405323222546395136"
+	}
+	url := fmt.Sprintf("https://admin-api.rocnovel.com/landingPage/config/list?clientGroupId=%s&clientGroupName=Florastory&contentType=4&pageIndex=%d&pageSize=%d&_=%d",
+		clientGroupID, pageIndex, pageSize, time.Now().UnixMilli())
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
+	activeAuth := strings.TrimSpace(auth)
+	if activeAuth == "" {
+		activeAuth = c.cfg.Authorization
+	}
+	if activeAuth != "" {
+		req.Header.Set("Authorization", activeAuth)
+	}
+	activeCookie := strings.TrimSpace(cookie)
+	if activeCookie == "" {
+		activeCookie = c.cfg.Cookie
+	}
+	if activeCookie != "" {
+		req.Header.Set("Cookie", activeCookie)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http error code: %d, body: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var res LandingPageConfigResponseDto
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("unmarshal landing page response failed: %w", err)
+	}
+	return &res, nil
+}
+
+// FetchSubscribeProductsForConfig 查询指定订阅配置下的产品明细
+func (c *Client) FetchSubscribeProductsForConfig(ctx context.Context, configID, auth, cookie string) ([]SubscribeConfigProductRecordDto, error) {
+	clientGroupID := c.cfg.ClientGroupID
+	if clientGroupID == "" {
+		clientGroupID = "405323222546395136"
+	}
+	url := fmt.Sprintf("https://admin-api.rocnovel.com/subscribe-config/product/list?clientGroupId=%s&clientGroupName=Florastory&configId=%s&contentType=4&pageIndex=1&pageSize=1000&paymentMethod=3",
+		clientGroupID, configID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
+	activeAuth := strings.TrimSpace(auth)
+	if activeAuth == "" {
+		activeAuth = c.cfg.Authorization
+	}
+	if activeAuth != "" {
+		req.Header.Set("Authorization", activeAuth)
+	}
+	activeCookie := strings.TrimSpace(cookie)
+	if activeCookie == "" {
+		activeCookie = c.cfg.Cookie
+	}
+	if activeCookie != "" {
+		req.Header.Set("Cookie", activeCookie)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http error code: %d, body: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var res SubscribeConfigProductResponseDto
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("unmarshal product response failed: %w", err)
+	}
+	if res.Data != nil && res.Data.Records != nil {
+		return res.Data.Records, nil
+	}
+	return []SubscribeConfigProductRecordDto{}, nil
+}
+

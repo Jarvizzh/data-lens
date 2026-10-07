@@ -38,7 +38,7 @@ func (h *FlicknovelHandler) SyncOrders(c *gin.Context) {
 
 	start := strings.TrimSpace(body.StartDate)
 	if start == "" {
-		start = "2026-09-16"
+		start = model.LaunchStartDateFlicknovel
 	}
 	end := strings.TrimSpace(body.EndDate)
 
@@ -65,7 +65,7 @@ func (h *FlicknovelHandler) SyncRelations(c *gin.Context) {
 
 	start := strings.TrimSpace(body.StartDate)
 	if start == "" {
-		start = "2026-09-16"
+		start = model.LaunchStartDateFlicknovel
 	}
 	end := strings.TrimSpace(body.EndDate)
 
@@ -150,7 +150,7 @@ func (h *FlicknovelHandler) GetConfig(c *gin.Context) {
 // UpdateConfig 更新番茄司南配置（限超级管理员） (/api/flicknovel/config/update)
 func (h *FlicknovelHandler) UpdateConfig(c *gin.Context) {
 	u := middleware.GetCurrentUser(c)
-	if u == nil || !strings.EqualFold(u.Role, "SUPER_ADMIN") {
+	if !u.IsSuperAdmin() {
 		response.Error(c, 403, "仅超级管理员可修改番茄司南配置")
 		return
 	}
@@ -172,10 +172,10 @@ func (h *FlicknovelHandler) UpdateConfig(c *gin.Context) {
 
 	// 持久化到 platform_config
 	if h.platformRepo != nil {
-		cfg, _ := h.platformRepo.FindByCode(c.Request.Context(), "flicknovel")
+		cfg, _ := h.platformRepo.FindByCode(c.Request.Context(), model.PlatformFlicknovel)
 		if cfg == nil {
 			cfg = &model.PlatformConfig{
-				PlatformCode: "flicknovel",
+				PlatformCode: model.PlatformFlicknovel,
 				PlatformName: "番茄司南",
 				AuthType:     "ED25519_KEY",
 				Status:       1,

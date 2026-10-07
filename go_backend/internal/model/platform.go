@@ -34,6 +34,32 @@ const (
 	LaunchStartDateFlicknovel = "2026-09-16"
 )
 
+// NormalizePlatform 归一化平台代码：去空格转小写；若为空或 all 则返回 PlatformAll ("ALL")
+func NormalizePlatform(code string) string {
+	c := strings.ToLower(strings.TrimSpace(code))
+	if c == "" || c == "all" {
+		return PlatformAll
+	}
+	return c
+}
+
+// IsRocnovel 判断平台是否为中文在线 (rocnovel)
+func IsRocnovel(code string) bool {
+	return strings.EqualFold(strings.TrimSpace(code), PlatformRocnovel)
+}
+
+// IsFlicknovel 判断平台是否为番茄司南 (flicknovel)
+func IsFlicknovel(code string) bool {
+	return strings.EqualFold(strings.TrimSpace(code), PlatformFlicknovel)
+}
+
+// IsAllPlatforms 判断是否为全平台模式 (空或 all/ALL)
+func IsAllPlatforms(code string) bool {
+	c := strings.ToLower(strings.TrimSpace(code))
+	return c == "" || c == "all"
+}
+
+
 // PlatformInfo 平台元数据
 type PlatformInfo struct {
 	Code            string

@@ -33,12 +33,12 @@ func NewPlatformHandler(
 
 // HasPlatformAccess 校验用户是否拥有指定平台的访问权限 (与 Java SysUser.hasPlatformAccess 严格对齐)
 func HasPlatformAccess(user *model.SysUser, platformCode string) bool {
-	if user == nil || strings.EqualFold(user.Role, "SUPER_ADMIN") {
+	if user == nil || user.IsSuperAdmin() {
 		return true
 	}
 	allowed := strings.TrimSpace(user.AllowedPlatforms)
 	if allowed == "" {
-		allowed = "ALL"
+		allowed = model.PlatformAll
 	}
 	parts := strings.Split(allowed, ",")
 	set := make(map[string]bool)
@@ -68,12 +68,12 @@ func (h *PlatformHandler) ListPlatforms(c *gin.Context) {
 	result := make([]model.PlatformItemDto, 0)
 
 	// 1. 若拥有 ALL 权限，首项返回大盘汇总
-	if HasPlatformAccess(user, "ALL") {
+	if HasPlatformAccess(user, model.PlatformAll) {
 		result = append(result, model.PlatformItemDto{
-			Code:            "ALL",
+			Code:            model.PlatformAll,
 			Name:            "大盘汇总",
 			Enabled:         true,
-			LaunchStartDate: "2026-07-10",
+			LaunchStartDate: model.LaunchStartDateRocnovel,
 		})
 	}
 
@@ -85,10 +85,10 @@ func (h *PlatformHandler) ListPlatforms(c *gin.Context) {
 			if cfg.Status == 1 && HasPlatformAccess(user, cfg.PlatformCode) {
 				startDate := cfg.LaunchStartDate
 				if startDate == "" {
-					if strings.EqualFold(cfg.PlatformCode, "flicknovel") {
-						startDate = "2026-09-16"
+					if model.IsFlicknovel(cfg.PlatformCode) {
+						startDate = model.LaunchStartDateFlicknovel
 					} else {
-						startDate = "2026-07-10"
+						startDate = model.LaunchStartDateRocnovel
 					}
 				} else if len(startDate) >= 10 {
 					startDate = startDate[:10]
@@ -105,30 +105,30 @@ func (h *PlatformHandler) ListPlatforms(c *gin.Context) {
 	}
 
 	// 3. 兜底内建平台 (rocnovel, flicknovel) 若未落库时自动补齐
-	if !addedCodes["rocnovel"] && HasPlatformAccess(user, "rocnovel") {
+	if !addedCodes[model.PlatformRocnovel] && HasPlatformAccess(user, model.PlatformRocnovel) {
 		result = append(result, model.PlatformItemDto{
-			Code:            "rocnovel",
+			Code:            model.PlatformRocnovel,
 			Name:            "中文在线",
 			Enabled:         true,
-			LaunchStartDate: "2026-07-10",
+			LaunchStartDate: model.LaunchStartDateRocnovel,
 		})
-		addedCodes["rocnovel"] = true
+		addedCodes[model.PlatformRocnovel] = true
 	}
-	if !addedCodes["flicknovel"] && HasPlatformAccess(user, "flicknovel") {
+	if !addedCodes[model.PlatformFlicknovel] && HasPlatformAccess(user, model.PlatformFlicknovel) {
 		result = append(result, model.PlatformItemDto{
-			Code:            "flicknovel",
+			Code:            model.PlatformFlicknovel,
 			Name:            "番茄司南",
 			Enabled:         true,
-			LaunchStartDate: "2026-09-16",
+			LaunchStartDate: model.LaunchStartDateFlicknovel,
 		})
-		addedCodes["flicknovel"] = true
+		addedCodes[model.PlatformFlicknovel] = true
 	}
 
 	response.Success(c, result)
 }
 
 func (h *PlatformHandler) TriggerSync(c *gin.Context) {
-	startTime := c.DefaultQuery("startTime", "2026-07-10")
+	startTime := c.DefaultQuery("startTime", model.LaunchStartDateRocnovel)
 	endTime := c.DefaultQuery("endTime", timeutil.GetTodayCst())
 
 	err := h.syncMgr.SyncOrdersAllPlatforms(c.Request.Context(), startTime, endTime)

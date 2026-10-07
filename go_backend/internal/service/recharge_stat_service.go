@@ -37,7 +37,7 @@ func NewRechargeStatService(
 
 // GetTodayForPlatform 对应 Java DailyRechargeStatService.getTodayForPlatform
 func GetTodayForPlatform(platformCode string) string {
-	if strings.EqualFold(platformCode, "flicknovel") {
+	if model.IsFlicknovel(platformCode) {
 		return timeutil.GetTodayUtc()
 	}
 	return timeutil.GetTodayCst()
@@ -583,7 +583,7 @@ func (s *RechargeStatService) CalculateAllDailyDistribution(ctx context.Context)
 	if err != nil {
 		return err
 	}
-	platforms := []string{"ALL", "rocnovel", "flicknovel"}
+	platforms := []string{model.PlatformAll, model.PlatformRocnovel, model.PlatformFlicknovel}
 	if len(users) == 0 {
 		for _, p := range platforms {
 			_ = s.CalculateDailyDistributionForUserDirect(ctx, p, 1)

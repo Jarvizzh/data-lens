@@ -71,19 +71,22 @@ func main() {
 
 	// 6. 初始化业务服务层
 	userSvc := service.NewUserService(userRepo, orderRepo, flicknovelRepo)
+	_ = userSvc.InitDefaultUsers(context.Background(), "superadmin", "@superadmin666")
 	permSvc := service.NewUserPermissionService(userRepo)
 	predictSvc := service.NewPredictService(benchmarkRepo)
+	predictSvc.SetDependencies(orderRepo, userRepo, userSvc)
 	ltvCache := service.NewLtvMemoryCache(30 * time.Minute)
 	calculator := service.NewLtvCalculator(orderRepo, ltvStatRepo, userRepo, predictSvc)
 	monthlySummarySvc := service.NewMonthlySummaryService()
 	ltvSvc := service.NewLtvService(calculator, ltvStatRepo, orderRepo, userRepo, userSvc, predictSvc, ltvCache, monthlySummarySvc)
 	rechargeSvc := service.NewRechargeStatService(orderRepo, userRepo, userSvc, rechargeDistRepo)
 	dailyDistSvc := service.NewDailyDistributionService(rechargeDistRepo, orderRepo, userRepo, rechargeSvc)
+	ltvSvc.SetRechargeDistService(dailyDistSvc)
 	syncMgr := service.NewSyncManager(orderRepo, flicknovelRepo, platformRepo, rocnovelClient, flicknovelClient, logger)
 	settleSvc := service.NewSettlementService(settleRepo, orderRepo, userRepo, userSvc)
 
 	// 7. 启动定时任务调度器
-	scheduler := cron.NewTaskScheduler(syncMgr, ltvSvc, rechargeSvc, userSvc, ltvCache, logger)
+	scheduler := cron.NewTaskScheduler(syncMgr, ltvSvc, rechargeSvc, userSvc, predictSvc, ltvCache, logger)
 	if err := scheduler.Start(); err != nil {
 		logger.Error("Start task scheduler failed", zap.Error(err))
 	}

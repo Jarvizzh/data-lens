@@ -9,6 +9,7 @@ import (
 
 	"go_backend/internal/model"
 	"go_backend/internal/pkg/timeutil"
+	"go_backend/internal/repository"
 	"go_backend/internal/service/engine"
 
 	"github.com/shopspring/decimal"
@@ -26,6 +27,9 @@ type BenchmarkRepository interface {
 
 type PredictService struct {
 	benchmarkRepo BenchmarkRepository
+	orderRepo     *repository.OrderRepository
+	userRepo      *repository.UserRepository
+	userSvc       *UserService
 	facade        *engine.LtvPredictFacade
 }
 
@@ -37,6 +41,12 @@ func NewPredictService(benchmarkRepo BenchmarkRepository) *PredictService {
 		benchmarkRepo: benchmarkRepo,
 		facade:        facade,
 	}
+}
+
+func (s *PredictService) SetDependencies(orderRepo *repository.OrderRepository, userRepo *repository.UserRepository, userSvc *UserService) {
+	s.orderRepo = orderRepo
+	s.userRepo = userRepo
+	s.userSvc = userSvc
 }
 
 // PredictCohort 单个 Cohort 回本与 ROI 预测
@@ -475,12 +485,288 @@ func (s *PredictService) generateSeedBenchmarks(dimType, dimVal string, period i
 	return list
 }
 
-// RecalculateAllBenchmarks 手动重算预测基准库
+// RecalculateAllBenchmarks 重算预测基准库 (对齐 Java LtvBenchmarkService.recalculateAllBenchmarks)
 func (s *PredictService) RecalculateAllBenchmarks(ctx context.Context) error {
-	for _, period := range []int{1, 7} {
-		_ = s.benchmarkRepo.DeleteBenchmarksByDim(ctx, "ALL", "DEFAULT", period)
-		seed := s.generateSeedBenchmarks("ALL", "DEFAULT", period)
-		_ = s.benchmarkRepo.BatchUpsertBenchmarks(ctx, seed)
+	if s.orderRepo == nil {
+		for _, period := range []int{1, 7} {
+			_ = s.benchmarkRepo.DeleteBenchmarksByDim(ctx, "ALL", "DEFAULT", period)
+			seed := s.generateSeedBenchmarks("ALL", "DEFAULT", period)
+			_ = s.benchmarkRepo.BatchUpsertBenchmarks(ctx, seed)
+		}
+		return nil
 	}
+
+	cutoffDate := time.Now().In(timeutil.BeijingZone).AddDate(0, 0, -65).Format(timeutil.DateLayout)
+	recentOrders, err := s.orderRepo.FindRecentValidOrdersByRegisterDate(ctx, cutoffDate)
+	if err != nil || len(recentOrders) == 0 {
+		s.populateSeedBenchmarks(ctx, "ALL", "DEFAULT", 1)
+		s.populateSeedBenchmarks(ctx, "ALL", "DEFAULT", 7)
+		return nil
+	}
+
+	// 提取活跃用户群体的订阅周期映射
+	memberIDsMap := make(map[string]bool)
+	for _, o := range recentOrders {
+		mID := strings.TrimSpace(o.MemberID)
+		if mID != "" {
+			memberIDsMap[mID] = true
+		}
+	}
+	memberIDs := make([]string, 0, len(memberIDsMap))
+	for mID := range memberIDsMap {
+		memberIDs = append(memberIDs, mID)
+	}
+
+	userPeriodMap, _ := s.orderRepo.FindSubscriptionPeriodsMap(ctx, memberIDs)
+
+	// 按 memberID 对应的 subPeriodDays 分组处理 (1: 日订, 7: 周订 等)
+	ordersByPeriod := make(map[int][]*model.RawOrder)
+	for _, o := range recentOrders {
+		mID := strings.TrimSpace(o.MemberID)
+		period := 1
+		if p, ok := userPeriodMap[mID]; ok && p > 0 {
+			period = p
+		}
+		ordersByPeriod[period] = append(ordersByPeriod[period], o)
+	}
+
+	for subPeriod, periodOrders := range ordersByPeriod {
+		s.calculateBenchmarkForGroup(ctx, "ALL", "DEFAULT", subPeriod, periodOrders, nil)
+	}
+
+	// 如果没有周订订单，为 weekly (sub_period=7) 生成基于日订衍生的基准
+	if _, ok := ordersByPeriod[7]; !ok {
+		s.populateSeedBenchmarks(ctx, "ALL", "DEFAULT", 7)
+	}
+
+	// 遍历每个活跃系统用户，生成专属的 USER 维度基准曲线
+	if s.userRepo != nil {
+		users, err := s.userRepo.FindAll(ctx)
+		if err == nil {
+			for _, u := range users {
+				s.recalculateBenchmarksForUser(ctx, u.ID, cutoffDate)
+			}
+		}
+	}
+
 	return nil
+}
+
+func (s *PredictService) recalculateBenchmarksForUser(ctx context.Context, userID int64, cutoffDate string) {
+	if s.userSvc == nil {
+		return
+	}
+	_, pidList, err := s.userSvc.GetLandingPageConfigs(ctx, "ALL", userID)
+	if err != nil || len(pidList) == 0 {
+		return
+	}
+
+	userOrders, err := s.orderRepo.FindOrdersByLandingPageIDs(ctx, "ALL", pidList)
+	if err != nil || len(userOrders) == 0 {
+		return
+	}
+
+	// 过滤近 65 天
+	var recentUserOrders []*model.RawOrder
+	for _, o := range userOrders {
+		regDate := o.RegisterDateET
+		if regDate >= cutoffDate {
+			recentUserOrders = append(recentUserOrders, o)
+		}
+	}
+	if len(recentUserOrders) == 0 {
+		return
+	}
+
+	memberIDsMap := make(map[string]bool)
+	for _, o := range recentUserOrders {
+		mID := strings.TrimSpace(o.MemberID)
+		if mID != "" {
+			memberIDsMap[mID] = true
+		}
+	}
+	memberIDs := make([]string, 0, len(memberIDsMap))
+	for mID := range memberIDsMap {
+		memberIDs = append(memberIDs, mID)
+	}
+	userPeriodMap, _ := s.orderRepo.FindSubscriptionPeriodsMap(ctx, memberIDs)
+
+	ordersByPeriod := make(map[int][]*model.RawOrder)
+	for _, o := range recentUserOrders {
+		mID := strings.TrimSpace(o.MemberID)
+		period := 1
+		if p, ok := userPeriodMap[mID]; ok && p > 0 {
+			period = p
+		}
+		ordersByPeriod[period] = append(ordersByPeriod[period], o)
+	}
+
+	dimType := "USER"
+	dimValue := strconv.FormatInt(userID, 10)
+
+	pageConfigs, _, _ := s.userSvc.GetLandingPageConfigs(ctx, "ALL", userID)
+	tzMap := make(map[string]string)
+	for _, pc := range pageConfigs {
+		if pc.LandingPageID != "" && pc.Timezone != "" {
+			tzMap[pc.LandingPageID] = pc.Timezone
+		}
+	}
+
+	for subPeriod, periodOrders := range ordersByPeriod {
+		s.calculateBenchmarkForGroup(ctx, dimType, dimValue, subPeriod, periodOrders, tzMap)
+	}
+}
+
+func (s *PredictService) calculateBenchmarkForGroup(
+	ctx context.Context,
+	dimType, dimValue string,
+	subPeriodDays int,
+	orders []*model.RawOrder,
+	tzMap map[string]string,
+) {
+	if len(orders) == 0 {
+		s.populateSeedBenchmarks(ctx, dimType, dimValue, subPeriodDays)
+		return
+	}
+
+	// 找出所有注册日期 Cohort
+	cohortMap := make(map[string][]*model.RawOrder)
+	for _, o := range orders {
+		regDate := GetEffectiveRegisterDate(o, tzMap)
+		if regDate != "" {
+			cohortMap[regDate] = append(cohortMap[regDate], o)
+		}
+	}
+
+	if len(cohortMap) == 0 {
+		s.populateSeedBenchmarks(ctx, dimType, dimValue, subPeriodDays)
+		return
+	}
+
+	now := time.Now().In(timeutil.BeijingZone)
+	maxMatureDay := 90
+
+	// 筛选过去 60 天内注册、且注册天数 >= 30 的成熟 Cohort
+	matureCohorts := make(map[string][]*model.RawOrder)
+	for regDateStr, cOrders := range cohortMap {
+		t, err := time.ParseInLocation(timeutil.DateLayout, regDateStr, timeutil.BeijingZone)
+		if err != nil {
+			continue
+		}
+		age := int(now.Sub(t).Hours() / 24)
+		if age <= 60 && age >= 30 {
+			matureCohorts[regDateStr] = cOrders
+		}
+	}
+
+	if len(matureCohorts) == 0 {
+		matureCohorts = cohortMap // 降级：使用所有可用 Cohort
+	}
+
+	cohortCount := len(matureCohorts)
+	totalInitialSubs := 0
+	totalActiveMembersCount := make(map[int]int)
+	totalRechargeMap := make(map[int]decimal.Decimal)
+
+	for regDateStr, cohortOrders := range matureCohorts {
+		regDate, err := time.ParseInLocation(timeutil.DateLayout, regDateStr, timeutil.BeijingZone)
+		if err != nil {
+			continue
+		}
+
+		// 统计 Cohort 初始订阅人数 N1 (renewType=1 首次订阅)
+		initialSubMembers := make(map[string]bool)
+		for _, o := range cohortOrders {
+			if o.IsSubs == 1 && (o.RenewType == 0 || o.RenewType == 1) {
+				mID := strings.TrimSpace(o.MemberID)
+				if mID != "" {
+					initialSubMembers[mID] = true
+				}
+			}
+		}
+		totalInitialSubs += len(initialSubMembers)
+
+		// 按 Day 统计划扣人数与金额
+		dayActiveMembers := make(map[int]map[string]bool)
+		for _, o := range cohortOrders {
+			if o.PayState != 1 {
+				continue
+			}
+			payDateStr := GetEffectivePayDate(o, tzMap)
+			if payDateStr == "" {
+				continue
+			}
+			payDate, err := time.ParseInLocation(timeutil.DateLayout, payDateStr, timeutil.BeijingZone)
+			if err != nil {
+				continue
+			}
+			dayIndex := int(payDate.Sub(regDate).Hours()/24) + 1
+			if dayIndex >= 1 && dayIndex <= maxMatureDay {
+				if dayActiveMembers[dayIndex] == nil {
+					dayActiveMembers[dayIndex] = make(map[string]bool)
+				}
+				dayActiveMembers[dayIndex][strings.TrimSpace(o.MemberID)] = true
+
+				cur := totalRechargeMap[dayIndex]
+				totalRechargeMap[dayIndex] = cur.Add(o.OrderAmountUSD)
+			}
+		}
+
+		for d, members := range dayActiveMembers {
+			totalActiveMembersCount[d] += len(members)
+		}
+	}
+
+	poolInitialSubs := totalInitialSubs
+	if poolInitialSubs < 1 {
+		poolInitialSubs = 1
+	}
+
+	var benchmarksToSave []*model.LtvPredictBenchmark
+	var baseRet [91]float64
+	var baseArpu [91]float64
+
+	defaultPrice := engine.DefaultDailySubPrice
+	if subPeriodDays > 1 {
+		defaultPrice = engine.DefaultWeeklySubPrice
+	}
+
+	for d := 1; d <= maxMatureDay; d++ {
+		activeCount := totalActiveMembersCount[d]
+		avgRet := float64(activeCount) / float64(poolInitialSubs)
+		recharge := totalRechargeMap[d]
+
+		avgArpu := 0.0
+		if activeCount > 0 {
+			rF, _ := recharge.Float64()
+			avgArpu = rF / float64(activeCount)
+		} else if d == 1 {
+			avgArpu = defaultPrice
+		}
+
+		baseRet[d] = avgRet
+		baseArpu[d] = avgArpu
+
+		bench := &model.LtvPredictBenchmark{
+			DimensionType:     dimType,
+			DimensionValue:    dimValue,
+			SubPeriodDays:     subPeriodDays,
+			DayIndex:          d,
+			BaseRetentionRate: decimal.NewFromFloatWithExponent(avgRet, -6),
+			BaseArpu:          decimal.NewFromFloatWithExponent(avgArpu, -2),
+			SampleCohortCount: cohortCount,
+			IsExtrapolated:    0,
+			UpdatedAt:         time.Now(),
+		}
+		benchmarksToSave = append(benchmarksToSave, bench)
+	}
+
+	_ = s.benchmarkRepo.DeleteBenchmarksByDim(ctx, dimType, dimValue, subPeriodDays)
+	_ = s.benchmarkRepo.BatchUpsertBenchmarks(ctx, benchmarksToSave)
+}
+
+func (s *PredictService) populateSeedBenchmarks(ctx context.Context, dimType, dimValue string, subPeriodDays int) {
+	seed := s.generateSeedBenchmarks(dimType, dimValue, subPeriodDays)
+	_ = s.benchmarkRepo.DeleteBenchmarksByDim(ctx, dimType, dimValue, subPeriodDays)
+	_ = s.benchmarkRepo.BatchUpsertBenchmarks(ctx, seed)
 }

@@ -57,6 +57,58 @@ func (s *UserService) ListAllUsers(ctx context.Context) ([]*model.SysUser, error
 	return s.userRepo.FindAll(ctx)
 }
 
+// InitDefaultUsers 初始化默认超级管理员和管理员 (对齐 Java UserService.@PostConstruct initDefaultUsers)
+func (s *UserService) InitDefaultUsers(ctx context.Context, defaultSuperAdminUsername, defaultSuperAdminPassword string) error {
+	if defaultSuperAdminUsername == "" {
+		defaultSuperAdminUsername = "superadmin"
+	}
+	if defaultSuperAdminPassword == "" {
+		defaultSuperAdminPassword = "@superadmin666"
+	}
+
+	// 1. 初始化或升级默认超级管理员 superadmin (SUPER_ADMIN)
+	superAdmin, err := s.userRepo.FindByUsername(ctx, defaultSuperAdminUsername)
+	if err != nil || superAdmin == nil {
+		newSuper := &model.SysUser{
+			Username:         defaultSuperAdminUsername,
+			PasswordHash:     HashPassword(defaultSuperAdminPassword),
+			Role:             model.RoleSuperAdmin,
+			Status:           model.UserStatusActive,
+			AllowedPlatforms: model.PlatformAll,
+			CreatedAt:        time.Now(),
+			UpdatedAt:        time.Now(),
+		}
+		_ = s.userRepo.Create(ctx, newSuper)
+	} else {
+		if !superAdmin.IsSuperAdmin() {
+			superAdmin.Role = model.RoleSuperAdmin
+			_ = s.userRepo.Update(ctx, superAdmin)
+		}
+	}
+
+	// 2. 确保 admin 账号角色归位为普通管理员 ADMIN
+	admin, err := s.userRepo.FindByUsername(ctx, "admin")
+	if err == nil && admin != nil {
+		if admin.IsSuperAdmin() {
+			admin.Role = model.RoleAdmin
+			_ = s.userRepo.Update(ctx, admin)
+		}
+	} else if admin == nil {
+		newAdmin := &model.SysUser{
+			Username:         "admin",
+			PasswordHash:     HashPassword("admin666"),
+			Role:             model.RoleAdmin,
+			Status:           model.UserStatusActive,
+			AllowedPlatforms: model.PlatformAll,
+			CreatedAt:        time.Now(),
+			UpdatedAt:        time.Now(),
+		}
+		_ = s.userRepo.Create(ctx, newAdmin)
+	}
+
+	return nil
+}
+
 type CreateUserParam struct {
 	Username               string
 	RawPassword            string
@@ -184,13 +236,13 @@ func (s *UserService) GetLandingPageConfigs(ctx context.Context, platformCode st
 		return nil, nil, err
 	}
 
-	isAdmin := strings.EqualFold(user.Role, "ADMIN") || strings.EqualFold(user.Role, "SUPER_ADMIN")
+	isAdmin := user.IsAdmin()
 
 	// 番茄司南 (flicknovel) 初始配置特殊处理：
 	// 仅管理员初始落地页默认填充系统已知的所有推广ID（时区默认 UTC）；普通用户初始默认为空
-	if strings.EqualFold(pCode, "flicknovel") && len(pages) == 0 {
+	if model.IsFlicknovel(pCode) && len(pages) == 0 {
 		if isAdmin {
-			allPids, _ := s.GetAllPlatformLandingPageIds(ctx, "flicknovel")
+			allPids, _ := s.GetAllPlatformLandingPageIds(ctx, model.PlatformFlicknovel)
 			if len(allPids) > 0 {
 				items := make([]dto.LandingPageConfigItem, 0, len(allPids))
 				ids := make([]string, 0, len(allPids))
@@ -198,9 +250,9 @@ func (s *UserService) GetLandingPageConfigs(ctx context.Context, platformCode st
 					clean := strings.TrimSpace(pid)
 					if clean != "" && !strings.EqualFold(clean, "__EMPTY__") {
 						items = append(items, dto.LandingPageConfigItem{
-							PlatformCode:  "flicknovel",
+							PlatformCode:  model.PlatformFlicknovel,
 							LandingPageID: clean,
-							Timezone:      "UTC",
+							Timezone:      model.UtcDefaultTimezone,
 						})
 						ids = append(ids, clean)
 					}
@@ -274,9 +326,9 @@ func (s *UserService) UpdateLandingPageConfigs(ctx context.Context, platformCode
 		}
 	}
 
-	pCode := strings.ToLower(platformCode)
-	if pCode == "" || pCode == "all" {
-		pCode = "rocnovel"
+	pCode := model.NormalizePlatform(platformCode)
+	if pCode == model.PlatformAll {
+		pCode = model.PlatformRocnovel
 	}
 
 	pages := make([]*model.UserLandingPage, 0, len(items))
@@ -286,7 +338,7 @@ func (s *UserService) UpdateLandingPageConfigs(ctx context.Context, platformCode
 		if pid == "" || pid == "__EMPTY__" {
 			continue
 		}
-		itemPCode := strings.ToLower(item.PlatformCode)
+		itemPCode := strings.ToLower(strings.TrimSpace(item.PlatformCode))
 		if itemPCode == "" {
 			itemPCode = pCode
 		}
@@ -298,10 +350,10 @@ func (s *UserService) UpdateLandingPageConfigs(ctx context.Context, platformCode
 
 		tz := strings.ToUpper(strings.TrimSpace(item.Timezone))
 		if tz == "" || tz == "BJ" {
-			if itemPCode == "flicknovel" {
-				tz = "UTC"
+			if model.IsFlicknovel(itemPCode) {
+				tz = model.UtcDefaultTimezone
 			} else {
-				tz = "CST"
+				tz = model.CstDefaultTimezone
 			}
 		}
 
@@ -326,15 +378,15 @@ func (s *UserService) UpdateLandingPageConfigs(ctx context.Context, platformCode
 }
 
 func (s *UserService) GetAllPlatformLandingPageIds(ctx context.Context, platformCode string) ([]string, error) {
-	pCode := strings.ToLower(platformCode)
-	if pCode == "" {
-		pCode = "rocnovel"
+	pCode := model.NormalizePlatform(platformCode)
+	if pCode == model.PlatformAll {
+		pCode = model.PlatformRocnovel
 	}
 
 	seen := make(map[string]bool)
 	var result []string
 
-	if pCode == "flicknovel" && s.flicknovelRepo != nil {
+	if model.IsFlicknovel(pCode) && s.flicknovelRepo != nil {
 		promos, err := s.flicknovelRepo.FindAllPromotionIDs(ctx)
 		if err == nil {
 			for _, pid := range promos {
@@ -365,7 +417,7 @@ func (s *UserService) GetAllPlatformLandingPageIds(ctx context.Context, platform
 
 // AutoImportFlicknovelLandingPagesForAdmins 自动为所有超级管理员/管理员补齐番茄司南全量推广ID (对齐 Java UserService.autoImportFlicknovelLandingPagesForAdmins)
 func (s *UserService) AutoImportFlicknovelLandingPagesForAdmins(ctx context.Context) (int, error) {
-	allPids, err := s.GetAllPlatformLandingPageIds(ctx, "flicknovel")
+	allPids, err := s.GetAllPlatformLandingPageIds(ctx, model.PlatformFlicknovel)
 	if err != nil || len(allPids) == 0 {
 		return 0, nil
 	}
@@ -377,7 +429,7 @@ func (s *UserService) AutoImportFlicknovelLandingPagesForAdmins(ctx context.Cont
 
 	var admins []*model.SysUser
 	for _, u := range users {
-		if u.Status == 1 && u.IsMaster != 1 && (strings.EqualFold(u.Role, "ADMIN") || strings.EqualFold(u.Role, "SUPER_ADMIN")) {
+		if u.IsActive() && u.IsMaster != 1 && u.IsAdmin() {
 			admins = append(admins, u)
 		}
 	}
@@ -387,7 +439,7 @@ func (s *UserService) AutoImportFlicknovelLandingPagesForAdmins(ctx context.Cont
 
 	totalImported := 0
 	for _, admin := range admins {
-		existingPages, err := s.userRepo.FindLandingPages(ctx, "flicknovel", admin.ID)
+		existingPages, err := s.userRepo.FindLandingPages(ctx, model.PlatformFlicknovel, admin.ID)
 		if err != nil {
 			continue
 		}
@@ -405,10 +457,10 @@ func (s *UserService) AutoImportFlicknovelLandingPagesForAdmins(ctx context.Cont
 			cleanPid := strings.TrimSpace(pid)
 			if cleanPid != "" && cleanPid != "__EMPTY__" && !existingPids[cleanPid] {
 				toAdd = append(toAdd, &model.UserLandingPage{
-					PlatformCode:  "flicknovel",
+					PlatformCode:  model.PlatformFlicknovel,
 					UserID:        admin.ID,
 					LandingPageID: cleanPid,
-					Timezone:      "UTC",
+					Timezone:      model.UtcDefaultTimezone,
 				})
 				existingPids[cleanPid] = true
 			}

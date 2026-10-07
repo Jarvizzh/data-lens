@@ -9,12 +9,33 @@ import (
 	"time"
 )
 
+// 用户角色常量
+const (
+	RoleSuperAdmin = "SUPER_ADMIN"
+	RoleAdmin      = "ADMIN"
+	RoleUser       = "USER"
+)
+
 // TokenInfo 存储解析后的用户 Token 信息
 type TokenInfo struct {
 	UserID   int64  `json:"userId"`
 	Username string `json:"username"`
 	Role     string `json:"role"`
 	Valid    bool   `json:"valid"`
+}
+
+func (t *TokenInfo) IsAdmin() bool {
+	if t == nil {
+		return false
+	}
+	return strings.EqualFold(t.Role, RoleAdmin) || strings.EqualFold(t.Role, RoleSuperAdmin)
+}
+
+func (t *TokenInfo) IsSuperAdmin() bool {
+	if t == nil {
+		return false
+	}
+	return strings.EqualFold(t.Role, RoleSuperAdmin)
 }
 
 // GenerateToken 生成包含有效期的加密 Token (与 Java TokenUtil 100% 兼容)
@@ -80,12 +101,12 @@ func ParseToken(tokenStr, secretKey string) TokenInfo {
 		sig := parts[2]
 
 		if nowMs > exp {
-			return TokenInfo{UserID: 1, Username: username, Role: "ADMIN", Valid: false}
+			return TokenInfo{UserID: 1, Username: username, Role: RoleAdmin, Valid: false}
 		}
 
 		expectedSig := sign(fmt.Sprintf("%s:%d", username, exp), secretKey)
 		if expectedSig == sig {
-			return TokenInfo{UserID: 1, Username: username, Role: "ADMIN", Valid: true}
+			return TokenInfo{UserID: 1, Username: username, Role: RoleAdmin, Valid: true}
 		}
 	}
 

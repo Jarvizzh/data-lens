@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -87,6 +89,16 @@ func LoadConfig(configPath string) (*Config, error) {
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config failed: %w", err)
+	}
+
+	if portEnv := os.Getenv("SERVER_PORT"); portEnv != "" {
+		if p, err := strconv.Atoi(portEnv); err == nil && p > 0 {
+			cfg.Server.Port = p
+		}
+	} else if portEnv := os.Getenv("PORT"); portEnv != "" {
+		if p, err := strconv.Atoi(portEnv); err == nil && p > 0 {
+			cfg.Server.Port = p
+		}
 	}
 
 	if cfg.Server.Port == 0 {

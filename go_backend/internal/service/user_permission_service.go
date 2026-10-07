@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"go_backend/internal/model"
 	"go_backend/internal/repository"
 	"go_backend/internal/service/dto"
 )
@@ -31,10 +32,10 @@ func (s *UserPermissionService) GetVisibleAccountsForUser(ctx context.Context, u
 	}
 
 	// 1. 超级管理员：可查看所有活跃账户
-	if strings.EqualFold(user.Role, "SUPER_ADMIN") {
+	if user.IsSuperAdmin() {
 		result := make([]dto.VisibleAccountDto, 0, len(allUsers))
 		for _, u := range allUsers {
-			if u.Status == 1 {
+			if u.IsActive() {
 				subCount := 0
 				if u.IsMaster == 1 {
 					subIDs, _ := s.userRepo.FindSubAccountIDs(ctx, u.ID)
@@ -113,7 +114,7 @@ func (s *UserPermissionService) CanUserViewTarget(ctx context.Context, currentUs
 	if targetUserID <= 0 || targetUserID == currentUserID {
 		return true
 	}
-	if strings.EqualFold(currentUserRole, "SUPER_ADMIN") {
+	if strings.EqualFold(currentUserRole, model.RoleSuperAdmin) {
 		return true
 	}
 	if s.userRepo.ExistsSubAccount(ctx, currentUserID, targetUserID) {
@@ -127,7 +128,7 @@ func (s *UserPermissionService) CanUserModifyTarget(ctx context.Context, current
 	if targetUserID <= 0 || targetUserID == currentUserID {
 		return true
 	}
-	if strings.EqualFold(currentUserRole, "SUPER_ADMIN") {
+	if strings.EqualFold(currentUserRole, model.RoleSuperAdmin) {
 		return true
 	}
 	return s.userRepo.ExistsSubAccount(ctx, currentUserID, targetUserID)
@@ -142,7 +143,7 @@ func (s *UserPermissionService) HasPermGlobalDistribution(ctx context.Context, u
 	if err != nil || user == nil {
 		return false
 	}
-	return strings.EqualFold(user.Role, "SUPER_ADMIN") || user.PermGlobalDistribution == 1
+	return user.IsSuperAdmin() || user.PermGlobalDistribution == 1
 }
 
 
@@ -158,7 +159,7 @@ func (s *UserPermissionService) GetSettlementAccountsForUser(ctx context.Context
 		return nil, err
 	}
 
-	isAdmin := strings.EqualFold(user.Role, "ADMIN") || strings.EqualFold(user.Role, "SUPER_ADMIN")
+	isAdmin := user.IsAdmin()
 	if isAdmin {
 		result := make([]dto.VisibleAccountDto, 0)
 		if user.IsSettlement == 1 || isAdmin {
@@ -278,7 +279,7 @@ func (s *UserPermissionService) UpdateUserPermissions(ctx context.Context, userI
 	user.PermExport = param.PermExport
 	user.PermSettlement = param.PermSettlement
 	user.PermVideoGen = param.PermVideoGen
-	if !strings.EqualFold(user.Role, "SUPER_ADMIN") && param.AllowedPlatforms != "" {
+	if !user.IsSuperAdmin() && param.AllowedPlatforms != "" {
 		user.AllowedPlatforms = param.AllowedPlatforms
 	}
 	user.UpdatedAt = time.Now()

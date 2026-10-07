@@ -52,13 +52,7 @@ func (r *OrderRepository) FindOrdersForLtvCalculation(
 	var orders []*model.RawOrder
 	q := r.db.WithContext(ctx).Where("pay_state = 1")
 
-	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
-		if strings.EqualFold(platformCode, "rocnovel") {
-			q = q.Where("(platform_code = 'rocnovel' OR platform_code IS NULL OR platform_code = '' OR platform_code = 'ALL')")
-		} else {
-			q = q.Where("platform_code = ?", strings.ToLower(platformCode))
-		}
-	}
+	q = applyPlatformFilter(q, platformCode)
 	if len(landingPageIDs) > 0 {
 		q = q.Where("landing_page_id IN ?", landingPageIDs)
 	}
@@ -93,13 +87,7 @@ func (r *OrderRepository) FindOrdersForLtvCalculation(
 func (r *OrderRepository) FindDistinctLandingPageIDs(ctx context.Context, platformCode string) ([]string, error) {
 	var ids []string
 	q := r.db.WithContext(ctx).Model(&model.RawOrder{}).Where("landing_page_id IS NOT NULL AND landing_page_id != ''")
-	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
-		if strings.EqualFold(platformCode, "rocnovel") {
-			q = q.Where("(platform_code = 'rocnovel' OR platform_code IS NULL OR platform_code = '' OR platform_code = 'ALL')")
-		} else {
-			q = q.Where("platform_code = ?", strings.ToLower(platformCode))
-		}
-	}
+	q = applyPlatformFilter(q, platformCode)
 	err := q.Distinct().Pluck("landing_page_id", &ids).Error
 	return ids, err
 }
@@ -115,13 +103,7 @@ func (r *OrderRepository) FindOrdersByLandingPageIDs(
 	}
 	var orders []*model.RawOrder
 	q := r.db.WithContext(ctx).Where("pay_state = 1")
-	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
-		if strings.EqualFold(platformCode, "rocnovel") {
-			q = q.Where("(platform_code = 'rocnovel' OR platform_code IS NULL OR platform_code = '' OR platform_code = 'ALL')")
-		} else {
-			q = q.Where("platform_code = ?", strings.ToLower(platformCode))
-		}
-	}
+	q = applyPlatformFilter(q, platformCode)
 	if len(landingPageIDs) > 0 {
 		q = q.Where("landing_page_id IN ?", landingPageIDs)
 	}
@@ -141,14 +123,18 @@ func (r *OrderRepository) FindAllValidOrders(ctx context.Context) ([]*model.RawO
 func (r *OrderRepository) FindValidOrdersByPlatform(ctx context.Context, platformCode string) ([]*model.RawOrder, error) {
 	var orders []*model.RawOrder
 	q := r.db.WithContext(ctx).Where("pay_state = 1")
-	if platformCode != "" && !strings.EqualFold(platformCode, "ALL") {
-		if strings.EqualFold(platformCode, "rocnovel") {
-			q = q.Where("(platform_code = 'rocnovel' OR platform_code IS NULL OR platform_code = '' OR platform_code = 'ALL')")
-		} else {
-			q = q.Where("platform_code = ?", strings.ToLower(platformCode))
-		}
-	}
+	q = applyPlatformFilter(q, platformCode)
 	err := q.Order("register_time_bj asc, pay_time_bj asc").Find(&orders).Error
+	return orders, err
+}
+
+// FindRecentValidOrdersByRegisterDate 查询指定生效注册日期以来的有效订单 (用于 LTV 预测基准库重算)
+func (r *OrderRepository) FindRecentValidOrdersByRegisterDate(ctx context.Context, cutoffDate string) ([]*model.RawOrder, error) {
+	var orders []*model.RawOrder
+	err := r.db.WithContext(ctx).
+		Where("pay_state = 1 AND register_date_et >= ?", cutoffDate).
+		Order("register_date_et asc, pay_date_et asc").
+		Find(&orders).Error
 	return orders, err
 }
 
@@ -197,13 +183,7 @@ func (r *OrderRepository) FindHistoryOrdersByMemberIDs(ctx context.Context, plat
 		}
 		var chunk []*model.RawOrder
 		q := r.db.WithContext(ctx).Where("member_id IN ?", memberIDs[i:end])
-		if pCode != "" && !strings.EqualFold(pCode, "ALL") {
-			if strings.EqualFold(pCode, "rocnovel") {
-				q = q.Where("(platform_code = 'rocnovel' OR platform_code IS NULL OR platform_code = '' OR platform_code = 'ALL')")
-			} else {
-				q = q.Where("platform_code = ?", pCode)
-			}
-		}
+		q = applyPlatformFilter(q, pCode)
 		if err := q.Find(&chunk).Error; err != nil {
 			return orders, err
 		}
@@ -264,3 +244,40 @@ func (r *OrderRepository) FindAllSubscriptionVersions(ctx context.Context) ([]*m
 	err := r.db.WithContext(ctx).Find(&list).Error
 	return list, err
 }
+
+// FindLatestVersionByPageAndProduct 查询落地页和产品ID对应的最新版本
+func (r *OrderRepository) FindLatestVersionByPageAndProduct(ctx context.Context, landingPageID, productID string) (*model.SubscriptionConfigVersion, error) {
+	var v model.SubscriptionConfigVersion
+	err := r.db.WithContext(ctx).
+		Where("landing_page_id = ? AND product_id = ?", landingPageID, productID).
+		Order("version_num desc").
+		First(&v).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &v, nil
+}
+
+// SaveSubscriptionVersion 保存或更新单个订阅配置版本
+func (r *OrderRepository) SaveSubscriptionVersion(ctx context.Context, v *model.SubscriptionConfigVersion) error {
+	if v == nil {
+		return nil
+	}
+	v.UpdatedAt = time.Now()
+	return r.db.WithContext(ctx).Save(v).Error
+}
+
+func applyPlatformFilter(q *gorm.DB, platformCode string) *gorm.DB {
+	if model.IsAllPlatforms(platformCode) {
+		return q
+	}
+	if model.IsRocnovel(platformCode) {
+		return q.Where("(platform_code = ? OR platform_code IS NULL OR platform_code = '' OR platform_code = ?)", model.PlatformRocnovel, model.PlatformAll)
+	}
+	return q.Where("platform_code = ?", strings.ToLower(strings.TrimSpace(platformCode)))
+}
+
+

@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  ltv-server:
+    image: ltv-server:latest
+    container_name: ltv-server
+    restart: always
+    ports:
+      - "8098:8098"
+    volumes:
+      # 挂载宿主机外部配置文件 (默认优先挂载生产配置，若无则使用 config.yaml)
+      - ./configs/config.production.yaml:/app/configs/config.yaml:ro
+      # 如果需要挂载日志目录，可在此配置
+      # - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Shanghai
+      - SERVER_PORT=8098
+      - CONFIG_PATH=/app/configs/config.yaml
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"

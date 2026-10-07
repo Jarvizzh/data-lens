@@ -169,9 +169,9 @@ func (r *UserRepository) ReplaceLandingPages(ctx context.Context, platformCode s
 		if len(landingPageIDs) == 0 {
 			return nil
 		}
-		plat := strings.ToLower(platformCode)
-		if plat == "" || plat == "all" {
-			plat = "rocnovel"
+		plat := model.NormalizePlatform(platformCode)
+		if plat == model.PlatformAll {
+			plat = model.PlatformRocnovel
 		}
 		pages := make([]model.UserLandingPage, 0, len(landingPageIDs))
 		for _, lpid := range landingPageIDs {
@@ -179,7 +179,7 @@ func (r *UserRepository) ReplaceLandingPages(ctx context.Context, platformCode s
 				PlatformCode:  plat,
 				UserID:        userID,
 				LandingPageID: lpid,
-				Timezone:      "CST",
+				Timezone:      model.CstDefaultTimezone,
 			})
 		}
 		return tx.Create(&pages).Error

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"go_backend/internal/middleware"
+	"go_backend/internal/model"
 	"go_backend/internal/pkg/response"
 	"go_backend/internal/service"
 	"go_backend/internal/service/dto"
@@ -338,7 +339,7 @@ func (h *LtvHandler) RecalculateBenchmark(c *gin.Context) {
 
 // SyncSubscribeConfigs 手动触发拉取订阅配置版本库 (/api/ltv/sync-subscribe-configs)
 func (h *LtvHandler) SyncSubscribeConfigs(c *gin.Context) {
-	platformCode := c.DefaultQuery("platformCode", "rocnovel")
+	platformCode := c.DefaultQuery("platformCode", model.PlatformRocnovel)
 	count := 0
 	if h.syncMgr != nil {
 		var err error

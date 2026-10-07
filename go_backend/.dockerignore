@@ -1,0 +1,12 @@
+.git
+.gitignore
+*.log
+*.tar.gz
+dist
+cmd
+internal
+go.mod
+go.sum
+README.md
+build_linux.sh
+.DS_Store

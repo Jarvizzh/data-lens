@@ -3,9 +3,9 @@ package handler
 import (
 	"net/http"
 	"strconv"
-	"strings"
 
 	"go_backend/internal/middleware"
+	"go_backend/internal/model"
 	"go_backend/internal/pkg/response"
 	"go_backend/internal/service"
 	"go_backend/internal/service/dto"
@@ -56,7 +56,7 @@ func (h *UserHandler) GetLandingPages(c *gin.Context) {
 		return
 	}
 
-	platformCode := c.DefaultQuery("platformCode", "rocnovel")
+	platformCode := c.DefaultQuery("platformCode", model.PlatformRocnovel)
 	targetUID := u.UserID
 	if paramID := c.Param("id"); paramID != "" {
 		if uid, err := strconv.ParseInt(paramID, 10, 64); err == nil && uid > 0 {
@@ -119,7 +119,7 @@ func (h *UserHandler) UpdateLandingPages(c *gin.Context) {
 
 	platformCode := req.PlatformCode
 	if platformCode == "" {
-		platformCode = c.DefaultQuery("platformCode", "rocnovel")
+		platformCode = c.DefaultQuery("platformCode", model.PlatformRocnovel)
 	}
 
 	items := req.LandingPages
@@ -128,7 +128,7 @@ func (h *UserHandler) UpdateLandingPages(c *gin.Context) {
 			items = append(items, dto.LandingPageConfigItem{
 				PlatformCode:  platformCode,
 				LandingPageID: id,
-				Timezone:      "CST",
+				Timezone:      model.CstDefaultTimezone,
 			})
 		}
 	}
@@ -140,7 +140,7 @@ func (h *UserHandler) UpdateLandingPages(c *gin.Context) {
 
 	if h.ltvSvc != nil {
 		_ = h.ltvSvc.CalculateLtvStatsForUserDirect(c.Request.Context(), platformCode, targetUID)
-		_ = h.ltvSvc.CalculateLtvStatsForUserDirect(c.Request.Context(), "ALL", targetUID)
+		_ = h.ltvSvc.CalculateLtvStatsForUserDirect(c.Request.Context(), model.PlatformAll, targetUID)
 	}
 
 	response.SuccessWithMsg(c, "落地页配置已更新，并完成个人报表秒级重算！", nil)
@@ -154,12 +154,12 @@ func (h *UserHandler) GetAllPlatformLandingPages(c *gin.Context) {
 		return
 	}
 
-	if !strings.EqualFold(u.Role, "ADMIN") && !strings.EqualFold(u.Role, "SUPER_ADMIN") {
+	if !u.IsAdmin() {
 		response.Error(c, 403, "普通用户无权载入全量推广ID")
 		return
 	}
 
-	platformCode := c.DefaultQuery("platformCode", "rocnovel")
+	platformCode := c.DefaultQuery("platformCode", model.PlatformRocnovel)
 	allPids, err := h.userSvc.GetAllPlatformLandingPageIds(c.Request.Context(), platformCode)
 	if err != nil {
 		response.Error(c, 500, "查询失败: "+err.Error())
