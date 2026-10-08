@@ -86,15 +86,6 @@ func (s *UserService) InitDefaultUsers(ctx context.Context, defaultSuperAdminUse
 		}
 	}
 
-	// 自动清理此前代码硬编码历史遗留且密码未变更的冗余 superadmin 账号
-	if defaultSuperAdminUsername != "superadmin" {
-		if oldSuper, err := s.userRepo.FindByUsername(ctx, "superadmin"); err == nil && oldSuper != nil {
-			if oldSuper.PasswordHash == HashPassword("@superadmin666") {
-				_ = s.userRepo.Delete(ctx, oldSuper.ID)
-			}
-		}
-	}
-
 	// 2. 确保 admin 账号角色归位为普通管理员 ADMIN
 	admin, err := s.userRepo.FindByUsername(ctx, "admin")
 	if err == nil && admin != nil {
