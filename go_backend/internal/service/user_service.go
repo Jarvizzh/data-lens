@@ -57,16 +57,15 @@ func (s *UserService) ListAllUsers(ctx context.Context) ([]*model.SysUser, error
 	return s.userRepo.FindAll(ctx)
 }
 
-// InitDefaultUsers 初始化默认超级管理员和管理员 (读取配置中的超级管理员账号与密码)
+// InitDefaultUsers 初始化配置的超级管理员 (无默认值，未配置账号密码则返回错误)
 func (s *UserService) InitDefaultUsers(ctx context.Context, defaultSuperAdminUsername, defaultSuperAdminPassword string) error {
-	if defaultSuperAdminUsername == "" {
-		defaultSuperAdminUsername = "super"
-	}
-	if defaultSuperAdminPassword == "" {
-		defaultSuperAdminPassword = "@super"
+	defaultSuperAdminUsername = strings.TrimSpace(defaultSuperAdminUsername)
+	defaultSuperAdminPassword = strings.TrimSpace(defaultSuperAdminPassword)
+	if defaultSuperAdminUsername == "" || defaultSuperAdminPassword == "" {
+		return fmt.Errorf("superadmin username and password must be configured in app.auth")
 	}
 
-	// 1. 初始化或升级配置中的超级管理员 (SUPER_ADMIN)
+	// 初始化或升级配置中的超级管理员 (SUPER_ADMIN)
 	superAdmin, err := s.userRepo.FindByUsername(ctx, defaultSuperAdminUsername)
 	if err != nil || superAdmin == nil {
 		newSuper := &model.SysUser{
@@ -78,32 +77,16 @@ func (s *UserService) InitDefaultUsers(ctx context.Context, defaultSuperAdminUse
 			CreatedAt:        time.Now(),
 			UpdatedAt:        time.Now(),
 		}
-		_ = s.userRepo.Create(ctx, newSuper)
+		if err := s.userRepo.Create(ctx, newSuper); err != nil {
+			return fmt.Errorf("failed to create superadmin user: %w", err)
+		}
 	} else {
 		if !superAdmin.IsSuperAdmin() {
 			superAdmin.Role = model.RoleSuperAdmin
-			_ = s.userRepo.Update(ctx, superAdmin)
+			if err := s.userRepo.Update(ctx, superAdmin); err != nil {
+				return fmt.Errorf("failed to update superadmin role: %w", err)
+			}
 		}
-	}
-
-	// 2. 确保 admin 账号角色归位为普通管理员 ADMIN
-	admin, err := s.userRepo.FindByUsername(ctx, "admin")
-	if err == nil && admin != nil {
-		if admin.IsSuperAdmin() {
-			admin.Role = model.RoleAdmin
-			_ = s.userRepo.Update(ctx, admin)
-		}
-	} else if admin == nil {
-		newAdmin := &model.SysUser{
-			Username:         "admin",
-			PasswordHash:     HashPassword("admin666"),
-			Role:             model.RoleAdmin,
-			Status:           model.UserStatusActive,
-			AllowedPlatforms: model.PlatformAll,
-			CreatedAt:        time.Now(),
-			UpdatedAt:        time.Now(),
-		}
-		_ = s.userRepo.Create(ctx, newAdmin)
 	}
 
 	return nil

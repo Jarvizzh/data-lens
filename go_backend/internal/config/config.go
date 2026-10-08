@@ -108,14 +108,8 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Server.Port == 0 {
 		cfg.Server.Port = 8080
 	}
-	if cfg.App.Auth.Username == "" {
-		cfg.App.Auth.Username = "super"
-	}
-	if cfg.App.Auth.Password == "" {
-		cfg.App.Auth.Password = "@super"
-	}
-	if cfg.App.Auth.SecretKey == "" {
-		cfg.App.Auth.SecretKey = "zw-ltv-secret-auth-key-2026-v2"
+	if strings.TrimSpace(cfg.App.Auth.Username) == "" || strings.TrimSpace(cfg.App.Auth.Password) == "" || strings.TrimSpace(cfg.App.Auth.SecretKey) == "" {
+		return nil, fmt.Errorf("app.auth (username, password, secret_key) must be explicitly configured")
 	}
 	if cfg.App.Auth.TokenExpireDays == 0 {
 		cfg.App.Auth.TokenExpireDays = 7

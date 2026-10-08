@@ -78,7 +78,9 @@ func main() {
 
 	// 6. 初始化业务服务层
 	userSvc := service.NewUserService(userRepo, orderRepo, flicknovelRepo)
-	_ = userSvc.InitDefaultUsers(context.Background(), cfg.App.Auth.Username, cfg.App.Auth.Password)
+	if err := userSvc.InitDefaultUsers(context.Background(), cfg.App.Auth.Username, cfg.App.Auth.Password); err != nil {
+		logger.Fatal("Initialize superadmin user failed", zap.Error(err))
+	}
 	permSvc := service.NewUserPermissionService(userRepo)
 	predictSvc := service.NewPredictService(benchmarkRepo)
 	predictSvc.SetDependencies(orderRepo, userRepo, userSvc)
