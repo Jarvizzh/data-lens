@@ -62,62 +62,93 @@ graph TD
 
 ### Step 1: 网文基准曲线匹配与兜底 (Benchmark Baseline Matching)
 
-针对 Cohort 中解析出的主导订阅周期 $P$（单次/日订 $P=1$, 周订 $P=7$, 月订 $P=30$ 等）：
+针对 Cohort 中解析出的主导订阅周期 `P`（单次/日订 `P=1`, 周订 `P=7`, 月订 `P=30` 等）：
+
 1. **订阅套餐版本动态挂接**：
    优先根据当前 Cohort 上线时间 `launchTime` 从 `subscription_config_version` 匹配当时的生效价格配置：
-   $$\text{Price}_{\text{first}} = \frac{\text{FirstPriceCent}}{100.0}, \quad \text{Price}_{\text{renew}} = \frac{\text{RenewPriceCent}}{100.0}$$
+   ```
+   Price_first = FirstPriceCent / 100.0
+   Price_renew = RenewPriceCent / 100.0
+   ```
 2. **历史大盘真实基准线匹配 (Empirical Baseline)**：
-   从数据库匹配该落地页/渠道维度由历史成熟 Cohort（Age ≥ 14 天）萃取出的留存率 $\text{baseRet}[d]$ 与单客 $\text{baseArpu}[d]$。
+   从数据库匹配该落地页/渠道维度由历史成熟 Cohort（Age ≥ 14 天）萃取出的留存率 `baseRet[d]` 与单客 `baseArpu[d]`。
 3. **合成基准线兜底 (Synthetic Standard Benchmark Fallback)**：
    若无历史基准数据，启用合成基准模型：
-   - **周订 / 月订**：在划扣周期节点 $d = 1, P+1, 2P+1, \dots$，按指数衰减建模：
-     $$\text{baseRet}[d] = 0.55^{\text{cycleIndex} - 1}$$
+   - **周订 / 月订**：在划扣周期节点 `d = 1, P+1, 2P+1, ...`，按指数衰减建模：
+     ```
+     baseRet[d] = 0.55 ^ (cycleIndex - 1)
+     ```
    - **单次/日订**：按网文流失幂律建模：
-     $$\text{baseRet}[d] = \frac{1}{d^{0.75}}$$
-   - **90 天后完本尾部长尾衰减**（$d > 90$）：
-     $$\text{baseRet}[d] = \text{baseRet}[90] \times \left(\frac{90}{d}\right)^{1.2}$$
+     ```
+     baseRet[d] = 1 / (d ^ 0.75)
+     ```
+   - **90 天后完本尾部长尾衰减**（`d > 90`）：
+     ```
+     baseRet[d] = baseRet[90] * (90 / d) ^ 1.2
+     ```
 
 ---
 
 ### Step 2: 动态客单萃取与放缩因子计算 (`computeOptimalScaleFactor`)
 
-设当前批次已知观察天数为 $T_{\text{obs}} = \min(\text{daysElapsed}, 60)$，实际累计 ROI 与基准预期 ROI 总和分别为：
-$$\text{ActualROI} = \frac{\text{ActualRecharge}}{\text{Spend}}, \quad \text{BaseROISum} = \sum_{d=1}^{T_{\text{obs}}} \frac{\text{baseRet}[d] \times \text{UnitPrice}_d \times N}{\text{Spend}}$$
+设当前批次已知观察天数为 `T_obs = min(daysElapsed, 60)`，实际累计 ROI 与基准预期 ROI 总和分别为：
+```
+ActualROI = ActualRecharge / Spend
+BaseROISum = Σ (baseRet[d] * UnitPrice_d * N) / Spend
+```
 
 #### 1. 单客充值力 (Realized ARPU) 贝叶斯动态萃取
 对于大额高频充值批次，单客真实充值水平可能显著偏离均值，系统通过贝叶斯吸收当前真实充值力：
-$$\text{RealizedARPU} = \frac{\text{ActualRecharge}}{N \times \sum_{d=1}^{T_{\text{obs}}} \text{baseRet}[d]}$$
-$$\text{EffectiveARPU} = w_{\text{arpu}} \cdot \text{clamp}(0.5 \cdot \text{BaseARPU}, 8.0 \cdot \text{BaseARPU}, \text{RealizedARPU}) + (1 - w_{\text{arpu}}) \cdot \text{BaseARPU}$$
-其中时间与样本置信度权重 $w_{\text{arpu}} = \text{timeWeight}(T_{\text{obs}}) \times \frac{N}{N + 5.0}$（7 天以内 $w_{\text{arpu}} = 0$ 保证早期风控，14 天后平滑升至 0.85）。
+```
+RealizedARPU = ActualRecharge / (N * Σ baseRet[d])
+EffectiveARPU = w_arpu * clamp(0.5 * BaseARPU, 8.0 * BaseARPU, RealizedARPU) + (1 - w_arpu) * BaseARPU
+```
+其中时间与样本置信度权重 `w_arpu = timeWeight(T_obs) * (N / (N + 5.0))`（7 天以内 `w_arpu = 0` 保证早期风控，14 天后平滑升至 0.85）。
 
 #### 2. 放缩因子贝叶斯先验收缩
-- **极早期（$T_{\text{obs}} \le 7$ 天）**：
+- **极早期（T_obs ≤ 7 天）**：
   引入消耗加权先验收缩，防范小消耗大充值导致预测虚高：
-  $$\alpha = \frac{\text{ActualROI} + \text{PriorWeight}}{\text{BaseROISum} + \text{PriorWeight}}, \quad \alpha \in [0.80, 1.25]$$
-  贝叶斯收缩权重：$w = 0.15 + 0.10 \times \frac{T_{\text{obs}}}{7}$。
-- **成熟期常规批次（$T_{\text{obs}} > 7$ 天）**：
-  $$\alpha \in [0.60, 2.00], \quad w = 0.85 + 0.10 \times \frac{\min(46, T_{\text{obs}} - 14)}{46}$$
-- **小样本活跃大户自适应松绑（$N \le 5$ 且连续充值占比 $C_7 \ge 0.70$ 且 $\text{ROI} \ge 0.40$）**：
+  ```
+  α = (ActualROI + PriorWeight) / (BaseROISum + PriorWeight),  其中 α ∈ [0.80, 1.25]
+  ```
+  贝叶斯收缩权重：`w = 0.15 + 0.10 * (T_obs / 7)`。
+- **成熟期常规批次（T_obs > 7 天）**：
+  ```
+  α ∈ [0.60, 2.00],  w = 0.85 + 0.10 * (min(46, T_obs - 14) / 46)
+  ```
+- **小样本活跃大户自适应松绑（N ≤ 5 且连续充值占比 C_7 ≥ 0.70 且 ROI ≥ 0.40）**：
   识别到大额连续复购读者后，放缩上限动态松绑至 `3.50`，远期衰减幂指数放宽至 `0.15`。
 
 最终放缩因子：
-$$\text{ScaleFactor} = w \cdot \alpha + (1.0 - w) \cdot 1.0$$
+```
+ScaleFactor = w * α + (1.0 - w) * 1.0
+```
 
 ---
 
 ### Step 3: 未来 365 天充值曲线推导与双轨系综融合 (Ensemble)
 
-从 $t = T_{\text{obs}} + 1$ 至 $365$ 天逐日外推：
+从 `t = T_obs + 1` 至 `365` 天逐日外推：
 
 1. **轨道 A：留存衰减基准外推曲线**：
-   - 放缩系数向 1.0 平滑回归衰减：$\text{scaleDecay}(t) = \left(\frac{T_{\text{obs}}}{t}\right)^{\text{SCALE\_DECAY\_EXPONENT}}$
-   - 周期续订自然衰减：$\text{cycleDecay}(t) = \left(\frac{7}{t}\right)^{\text{CYCLE\_DECAY\_EXPONENT}} \quad (t > 7)$
+   - 放缩系数向 1.0 平滑回归衰减：
+     ```
+     scaleDecay(t) = (T_obs / t) ^ SCALE_DECAY_EXPONENT
+     ```
+   - 周期续订自然衰减：
+     ```
+     cycleDecay(t) = (7 / t) ^ CYCLE_DECAY_EXPONENT   (t > 7)
+     ```
    - 单日预测充值增量：
-     $$\Delta R(t) = \text{baseRet}[t] \times [1.0 + (\text{ScaleFactor} - 1.0) \times \text{scaleDecay}(t)] \times \text{cycleDecay}(t) \times \text{EffectiveARPU} \times N$$
+     ```
+     ΔR(t) = baseRet[t] * [1.0 + (ScaleFactor - 1.0) * scaleDecay(t)] * cycleDecay(t) * EffectiveARPU * N
+     ```
 2. **轨道 B：成熟期 (D14+) 双轨 OLS 动量动态系综融合**：
-   当 $T_{\text{obs}} \ge 14$ 且历史累计充值对数拟合优度 $R^2 \ge 0.85$ 时，激活系综融合：
-   $$\text{CumRecharge}[t] = (1 - \lambda) \times \text{CumRecharge}_A[t] + \lambda \times [\text{Spend} \times (a \cdot \ln(t) + b)]$$
-   其中融合权重 $\lambda \in [0, 0.45]$ 动态由 $R^2$ 与数据成熟度决定。
+   当 `T_obs ≥ 14` 且历史累计充值对数拟合优度 `R^2 ≥ 0.85` 时，激活系综融合：
+   ```
+   CumRecharge[t] = (1 - λ) * CumRecharge_A[t] + λ * [Spend * (a * ln(t) + b)]
+   ```
+   其中融合权重 `λ ∈ [0, 0.45]` 动态由 `R^2` 与数据成熟度决定。
 
 ---
 
@@ -139,21 +170,27 @@ flowchart TD
 ```
 
 ### 1. 通用订阅/复购平盘停滞判定 (`isSubscriptionStagnant`)
-根据 Cohort 解析出的主导周期 $P$，动态计算平盘判定窗口：
-$$\text{RequiredFlatDays} = \max(6, P \times 2)$$
-- **单次/日订** ($P \le 3$)：连续 6 天充值增量 $\le \$0.01$，表明读者流失停读，判定为停滞；
-- **周卡/周订** ($P = 7$)：连续 14 天（两期）充值增量 $\le \$0.01$，表明连续两周未发生续费，判定为停滞；
-- **月卡/月订** ($P = 30$)：连续 60 天（两期）充值增量 $\le \$0.01$，判定为停滞。
+根据 Cohort 解析出的主导周期 `P`，动态计算平盘判定窗口：
+```
+RequiredFlatDays = max(6, P * 2)
+```
+- **单次/日订** (`P ≤ 3`)：连续 6 天充值增量 ≤ $0.01，表明读者流失停读，判定为停滞；
+- **周卡/周订** (`P = 7`)：连续 14 天（两期）充值增量 ≤ $0.01，表明连续两周未发生续费，判定为停滞；
+- **月卡/月订** (`P = 30`)：连续 60 天（两期）充值增量 ≤ $0.01，判定为停滞。
 触发停滞后未来充值曲线锁定为平盘，预测回本天数返回 `-1`。
 
 ### 2. 首充冲动型断崖衰竭保护 (Impulse Dropoff Detection)
-在 $D3 \sim D5$ 早期观察期，若检测到用户在首日大额充值后后续充值断崖停滞：
-$$\text{Recharge}(D3) \le \text{Recharge}(D1) \times 1.05$$
-引擎自动施加 $0.70$ 的流失折价系数，彻底杜绝首日高充值导致的早期盲目乐观。
+在 `D3 ~ D5` 早期观察期，若检测到用户在首日大额充值后后续充值断崖停滞：
+```
+Recharge(D3) ≤ Recharge(D1) * 1.05
+```
+引擎自动施加 `0.70` 的流失折价系数，彻底杜绝首日高充值导致的早期盲目乐观。
 
 ### 3. 时间自适应弹性上下界保护 (Elastic Dynamic Bounds)
 废除硬编码的静态 ROI 天花板，基于当前达成 ROI 与剩余天数动态推导理论上限：
-$$\text{MaxROI}_{30}(t) = \text{ActualROI}(t) \times \left(1.0 + 2.2 \sqrt{\frac{30 - t}{30}}\right) + 0.08 \times \left(\frac{30 - t}{30}\right)$$
+```
+MaxROI_30(t) = ActualROI(t) * (1.0 + 2.2 * sqrt((30 - t) / 30)) + 0.08 * ((30 - t) / 30)
+```
 
 ### 4. 自然日历对齐大盘回本计算 (`calculateOverallPaybackDays`)
 对于包含多个跨时间上线广告组的整体大盘，系统采用 **自下而上（Bottom-Up）自然日历对齐算法**：
