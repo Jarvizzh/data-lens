@@ -23,7 +23,7 @@ type SingleMonthSummaryDto struct {
 	PredictedDay90Roi *decimal.Decimal `json:"predictedDay90Roi"`
 }
 
-// MonthlySummaryDto 包含近 4 个月度汇总
+// MonthlySummaryDto 包含近 6 个月度汇总
 type MonthlySummaryDto struct {
 	Months    []SingleMonthSummaryDto `json:"months"`
 	ThisMonth *SingleMonthSummaryDto  `json:"thisMonth"`

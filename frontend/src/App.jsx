@@ -722,7 +722,7 @@ export default function App() {
   const totalSubUsers = displayedLtvData.reduce((acc, cur) => acc + (parseInt(cur.subUserCount) || 0), 0);
   const overallRoi = totalSpend > 0 ? (((totalRecharge - totalRefund) / totalSpend) * 100).toFixed(2) : '0.00';
 
-  // 月度卡片指标完全由后端接口计算并返回 (monthlySummary)，支持近4个月动态列表
+  // 月度卡片指标完全由后端接口计算并返回 (monthlySummary)，支持近6个月动态列表
   const monthlyList = Array.isArray(monthlySummary?.months) && monthlySummary.months.length > 0
     ? monthlySummary.months
     : (monthlySummary?.thisMonth ? [monthlySummary.thisMonth, ...(monthlySummary.lastMonth ? [monthlySummary.lastMonth] : [])] : []);

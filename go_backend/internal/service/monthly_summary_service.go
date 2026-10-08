@@ -176,7 +176,7 @@ func CalculateActualPaybackDaysForMonth(
 	return nil
 }
 
-// BuildMonthlySummary 从每日统计与订单中聚合近 4 个自然月的月度汇总指标
+// BuildMonthlySummary 从每日统计与订单中聚合近 6 个自然月的月度汇总指标
 func (s *MonthlySummaryService) BuildMonthlySummary(
 	ctx context.Context,
 	platformCode string,
@@ -213,8 +213,8 @@ func (s *MonthlySummaryService) BuildMonthlySummary(
 		}
 	}
 
-	months := make([]dto.SingleMonthSummaryDto, 0, 4)
-	for i := 0; i < 4; i++ {
+	months := make([]dto.SingleMonthSummaryDto, 0, 6)
+	for i := 0; i < 6; i++ {
 		targetDate := today.AddDate(0, -i, 0)
 		ym := targetDate.Format("2006-01")
 		if minYM != "" && ym < minYM {
