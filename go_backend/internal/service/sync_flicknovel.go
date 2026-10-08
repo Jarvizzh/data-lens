@@ -417,6 +417,10 @@ func (m *SyncManager) batchCleanAndSaveFlicknovelOrders(
 	})
 
 	batchSize := 200
+	// 无论外层请求上下文是否中断，使用独立写上下文确保清洗后的数据安全入库
+	writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancelWrite()
+
 	savedCount := 0
 	for i := 0; i < len(toSave); i += batchSize {
 		end := i + batchSize
@@ -427,14 +431,14 @@ func (m *SyncManager) batchCleanAndSaveFlicknovelOrders(
 
 		var batchErr error
 		for attempt := 0; attempt < 3; attempt++ {
-			err := m.orderRepo.BatchUpsert(ctx, batch)
+			err := m.orderRepo.BatchUpsert(writeCtx, batch)
 			if err == nil {
 				savedCount += len(batch)
 				batchErr = nil
 				// 维护首次订阅用户的周期配置表
 				for _, ord := range batch {
 					if ord.IsSubs == 1 && ord.RenewType == 1 {
-						m.saveOrUpdateUserSubscriptionPeriod(ctx, model.PlatformFlicknovel, ord.MemberID, ord.LandingPageID, ord.OrderAmountCent, ord.RegisterTimeBJ)
+						m.saveOrUpdateUserSubscriptionPeriod(writeCtx, model.PlatformFlicknovel, ord.MemberID, ord.LandingPageID, ord.OrderAmountCent, ord.RegisterTimeBJ)
 					}
 				}
 				break

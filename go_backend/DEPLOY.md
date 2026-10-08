@@ -132,11 +132,11 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         
-        # 长连接优化
+        # 长连接与大跨度数据同步超时优化 (避免全量历史同步触发 Nginx 默认 60s 截断)
         proxy_http_version 1.1;
         proxy_set_header Connection "";
-        proxy_read_timeout 120s;
-        proxy_send_timeout 120s;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
     }
 }
 ```

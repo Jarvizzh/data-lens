@@ -171,7 +171,7 @@ func (m *SyncManager) SyncRocnovelOrders(ctx context.Context, startTime, endTime
 	)
 
 	startSyncTime := time.Now()
-	concurrency := 5
+	concurrency := 15
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	var completedDays atomic.Int64
@@ -183,7 +183,7 @@ func (m *SyncManager) SyncRocnovelOrders(ctx context.Context, startTime, endTime
 	var allOrders []*model.RawOrder
 
 	for _, day := range targetDays {
-		if tokenExpired.Load() {
+		if tokenExpired.Load() || ctx.Err() != nil {
 			break
 		}
 
@@ -196,7 +196,7 @@ func (m *SyncManager) SyncRocnovelOrders(ctx context.Context, startTime, endTime
 				wg.Done()
 			}()
 
-			if tokenExpired.Load() {
+			if tokenExpired.Load() || ctx.Err() != nil {
 				return
 			}
 
@@ -209,7 +209,9 @@ func (m *SyncManager) SyncRocnovelOrders(ctx context.Context, startTime, endTime
 					m.logger.Warn("Rocnovel token expired during sync", zap.String("day", dayStr))
 					return
 				}
-				m.logger.Warn("Failed to fetch Rocnovel orders for day", zap.String("day", dayStr), zap.Error(err))
+				if ctx.Err() == nil {
+					m.logger.Warn("Failed to fetch Rocnovel orders for day", zap.String("day", dayStr), zap.Error(err))
+				}
 			} else {
 				completedDays.Add(1)
 				if len(orders) > 0 {
@@ -246,6 +248,10 @@ func (m *SyncManager) SyncRocnovelOrders(ctx context.Context, startTime, endTime
 		return allOrders[i].OrderID < allOrders[j].OrderID
 	})
 
+	// 无论外层请求上下文是否收到客户端中断，对内存中已拉取的宝贵数据执行脱钩保护写库，确保不丢失已抓取数据
+	writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancelWrite()
+
 	batchSize := 200
 	totalSaved := 0
 	for i := 0; i < len(allOrders); i += batchSize {
@@ -257,14 +263,14 @@ func (m *SyncManager) SyncRocnovelOrders(ctx context.Context, startTime, endTime
 
 		var batchErr error
 		for attempt := 0; attempt < 3; attempt++ {
-			err := m.orderRepo.BatchUpsert(ctx, batch)
+			err := m.orderRepo.BatchUpsert(writeCtx, batch)
 			if err == nil {
 				totalSaved += len(batch)
 				batchErr = nil
 				// 维护首次订阅用户的周期配置表
 				for _, ord := range batch {
 					if ord.IsSubs == 1 && ord.RenewType == 1 {
-						m.saveOrUpdateUserSubscriptionPeriod(ctx, model.PlatformRocnovel, ord.MemberID, ord.LandingPageID, ord.OrderAmountCent, ord.RegisterTimeBJ)
+						m.saveOrUpdateUserSubscriptionPeriod(writeCtx, model.PlatformRocnovel, ord.MemberID, ord.LandingPageID, ord.OrderAmountCent, ord.RegisterTimeBJ)
 					}
 				}
 				break

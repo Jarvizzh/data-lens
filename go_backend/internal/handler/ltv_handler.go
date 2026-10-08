@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"go_backend/internal/middleware"
 	"go_backend/internal/model"
@@ -183,12 +185,15 @@ func (h *LtvHandler) Recalculate(c *gin.Context) {
 	platformCode := c.DefaultQuery("platformCode", "ALL")
 	targetUID := h.resolveTargetUserID(c)
 
-	_ = h.ltvSvc.CalculateLtvStatsForUser(c.Request.Context(), platformCode, targetUID)
+	opCtx, cancelOp := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 10*time.Minute)
+	defer cancelOp()
+
+	_ = h.ltvSvc.CalculateLtvStatsForUser(opCtx, platformCode, targetUID)
 	if h.distSvc != nil {
-		_ = h.distSvc.CalculateDailyDistributionForUser(c.Request.Context(), platformCode, targetUID)
+		_ = h.distSvc.CalculateDailyDistributionForUser(opCtx, platformCode, targetUID)
 	}
 
-	resp, err := h.ltvSvc.GetLtvListResponse(c.Request.Context(), platformCode, targetUID)
+	resp, err := h.ltvSvc.GetLtvListResponse(opCtx, platformCode, targetUID)
 	if err != nil {
 		response.Error(c, 500, "重算 LTV 失败: "+err.Error())
 		return
@@ -202,9 +207,12 @@ func (h *LtvHandler) RecalculateLtv(c *gin.Context) {
 	platformCode := c.DefaultQuery("platformCode", "ALL")
 	targetUID := h.resolveTargetUserID(c)
 
-	_ = h.ltvSvc.CalculateLtvStatsForUser(c.Request.Context(), platformCode, targetUID)
+	opCtx, cancelOp := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 10*time.Minute)
+	defer cancelOp()
 
-	resp, err := h.ltvSvc.GetLtvListResponse(c.Request.Context(), platformCode, targetUID)
+	_ = h.ltvSvc.CalculateLtvStatsForUser(opCtx, platformCode, targetUID)
+
+	resp, err := h.ltvSvc.GetLtvListResponse(opCtx, platformCode, targetUID)
 	if err != nil {
 		response.Error(c, 500, "重算 LTV 失败: "+err.Error())
 		return
@@ -230,10 +238,13 @@ func (h *LtvHandler) SyncOrders(c *gin.Context) {
 		platformCode = "ALL"
 	}
 
+	opCtx, cancelOp := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 10*time.Minute)
+	defer cancelOp()
+
 	totalSynced := 0
 	if h.syncMgr != nil {
 		var err error
-		totalSynced, err = h.syncMgr.SyncOrdersForPlatform(c.Request.Context(), platformCode, req.StartTime, req.EndTime)
+		totalSynced, err = h.syncMgr.SyncOrdersForPlatform(opCtx, platformCode, req.StartTime, req.EndTime)
 		if err != nil {
 			if strings.Contains(err.Error(), "TOKEN_EXPIRED") {
 				c.JSON(http.StatusOK, gin.H{
@@ -271,10 +282,13 @@ func (h *LtvHandler) SyncAndCalc(c *gin.Context) {
 		platformCode = "ALL"
 	}
 
+	opCtx, cancelOp := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 10*time.Minute)
+	defer cancelOp()
+
 	totalSynced := 0
 	if h.syncMgr != nil {
 		var err error
-		totalSynced, err = h.syncMgr.SyncOrdersForPlatform(c.Request.Context(), platformCode, req.StartTime, req.EndTime)
+		totalSynced, err = h.syncMgr.SyncOrdersForPlatform(opCtx, platformCode, req.StartTime, req.EndTime)
 		if err != nil && strings.Contains(err.Error(), "TOKEN_EXPIRED") {
 			c.JSON(http.StatusOK, gin.H{
 				"code": 4002,
@@ -283,9 +297,9 @@ func (h *LtvHandler) SyncAndCalc(c *gin.Context) {
 			return
 		}
 	}
-	_ = h.ltvSvc.CalculateAllLtvStats(c.Request.Context())
+	_ = h.ltvSvc.CalculateAllLtvStats(opCtx)
 	if h.distSvc != nil {
-		_ = h.distSvc.CalculateAllDailyDistribution(c.Request.Context())
+		_ = h.distSvc.CalculateAllDailyDistribution(opCtx)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"code":              0,
@@ -299,7 +313,10 @@ func (h *LtvHandler) RecalculateDailyDistribution(c *gin.Context) {
 	platformCode := c.DefaultQuery("platformCode", "ALL")
 	targetUID := h.resolveTargetUserID(c)
 
-	resp, err := h.distSvc.RecalculateDailyDistribution(c.Request.Context(), platformCode, targetUID)
+	opCtx, cancelOp := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 10*time.Minute)
+	defer cancelOp()
+
+	resp, err := h.distSvc.RecalculateDailyDistribution(opCtx, platformCode, targetUID)
 	if err != nil {
 		response.Error(c, 500, "重算每日充值分析失败: "+err.Error())
 		return
