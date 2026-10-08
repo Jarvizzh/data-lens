@@ -171,7 +171,7 @@ func (m *SyncManager) SyncRocnovelOrders(ctx context.Context, startTime, endTime
 	)
 
 	startSyncTime := time.Now()
-	concurrency := 15
+	concurrency := 8
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	var completedDays atomic.Int64
