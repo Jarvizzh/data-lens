@@ -176,7 +176,7 @@ func (h *FlicknovelHandler) UpdateConfig(c *gin.Context) {
 		if cfg == nil {
 			cfg = &model.PlatformConfig{
 				PlatformCode: model.PlatformFlicknovel,
-				PlatformName: "番茄司南",
+				PlatformName: model.PlatformNameFlicknovel,
 				AuthType:     "ED25519_KEY",
 				Status:       1,
 			}

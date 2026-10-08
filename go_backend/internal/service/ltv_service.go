@@ -530,19 +530,14 @@ func containsString(list []string, item string) bool {
 }
 
 func formatPlatformRemark(platformCode, rawRemark string) string {
-	if rawRemark == "" {
+	cleanRemark := strings.TrimSpace(rawRemark)
+	if cleanRemark == "" {
 		return ""
 	}
-	pName := platformCode
-	switch strings.ToLower(strings.TrimSpace(platformCode)) {
-	case model.PlatformRocnovel:
-		pName = "洛奇小说"
-	case model.PlatformFlicknovel:
-		pName = "番茄司南"
-	}
+	pName := model.GetDisplayNameForPlatform(platformCode)
 	prefix := pName + "："
-	if strings.HasPrefix(rawRemark, prefix) {
-		return rawRemark
+	if strings.HasPrefix(cleanRemark, prefix) {
+		return cleanRemark
 	}
-	return prefix + rawRemark
+	return prefix + cleanRemark
 }

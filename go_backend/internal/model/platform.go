@@ -30,9 +30,25 @@ const (
 	CstDefaultTimezone = "CST"
 	UtcDefaultTimezone = "UTC"
 
+	PlatformNameAll        = "大盘汇总"
+	PlatformNameRocnovel   = "中文在线"
+	PlatformNameFlicknovel = "番茄司南"
+
 	LaunchStartDateRocnovel   = "2026-07-10"
 	LaunchStartDateFlicknovel = "2026-09-16"
 )
+
+// GetDisplayNameForPlatform 根据平台代码安全获取展示名称
+func GetDisplayNameForPlatform(code string) string {
+	c := strings.ToLower(strings.TrimSpace(code))
+	if p, ok := SupportedPlatforms[c]; ok {
+		return p.DisplayName
+	}
+	if c != "" {
+		return c
+	}
+	return PlatformNameAll
+}
 
 // NormalizePlatform 归一化平台代码：去空格转小写；若为空或 all 则返回 PlatformAll ("ALL")
 func NormalizePlatform(code string) string {
@@ -72,21 +88,21 @@ type PlatformInfo struct {
 var SupportedPlatforms = map[string]PlatformInfo{
 	"all": {
 		Code:            PlatformAll,
-		DisplayName:     "大盘汇总",
+		DisplayName:     PlatformNameAll,
 		Enabled:         true,
 		LaunchStartDate: LaunchStartDateRocnovel,
 		DefaultTimezone: CstDefaultTimezone,
 	},
 	"rocnovel": {
 		Code:            PlatformRocnovel,
-		DisplayName:     "中文在线",
+		DisplayName:     PlatformNameRocnovel,
 		Enabled:         true,
 		LaunchStartDate: LaunchStartDateRocnovel,
 		DefaultTimezone: CstDefaultTimezone,
 	},
 	"flicknovel": {
 		Code:            PlatformFlicknovel,
-		DisplayName:     "番茄司南",
+		DisplayName:     PlatformNameFlicknovel,
 		Enabled:         true,
 		LaunchStartDate: LaunchStartDateFlicknovel,
 		DefaultTimezone: UtcDefaultTimezone,

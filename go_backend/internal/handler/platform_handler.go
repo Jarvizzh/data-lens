@@ -108,7 +108,7 @@ func (h *PlatformHandler) ListPlatforms(c *gin.Context) {
 	if !addedCodes[model.PlatformRocnovel] && HasPlatformAccess(user, model.PlatformRocnovel) {
 		result = append(result, model.PlatformItemDto{
 			Code:            model.PlatformRocnovel,
-			Name:            "中文在线",
+			Name:            model.PlatformNameRocnovel,
 			Enabled:         true,
 			LaunchStartDate: model.LaunchStartDateRocnovel,
 		})
@@ -117,7 +117,7 @@ func (h *PlatformHandler) ListPlatforms(c *gin.Context) {
 	if !addedCodes[model.PlatformFlicknovel] && HasPlatformAccess(user, model.PlatformFlicknovel) {
 		result = append(result, model.PlatformItemDto{
 			Code:            model.PlatformFlicknovel,
-			Name:            "番茄司南",
+			Name:            model.PlatformNameFlicknovel,
 			Enabled:         true,
 			LaunchStartDate: model.LaunchStartDateFlicknovel,
 		})
