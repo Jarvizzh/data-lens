@@ -20,6 +20,7 @@ type RouterParams struct {
 }
 
 func SetupRouter(p RouterParams) *gin.Engine {
+	gin.DisableConsoleColor()
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(middleware.GinLogger(p.Logger))

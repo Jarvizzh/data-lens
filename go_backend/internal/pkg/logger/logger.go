@@ -63,9 +63,9 @@ func NewLogger(cfg *config.LoggerConfig) (*zap.Logger, error) {
 		encoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
 		encoder = zapcore.NewJSONEncoder(encoderConfig)
 	} else {
-		// 终端友好模式 (Console): 带终端彩色、人类可读时间、直观多行排版
+		// 终端友好模式 (Console): 无 ANSI 转义颜色、人类可读时间、直观多行排版
 		encoderConfig.EncodeTime = customTimeEncoder
-		encoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+		encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 		encoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
 		encoder = zapcore.NewConsoleEncoder(encoderConfig)
 	}

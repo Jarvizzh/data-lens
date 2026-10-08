@@ -19,10 +19,10 @@ func InitDB(cfg *config.MySQLConfig) (*gorm.DB, error) {
 	newLogger := gormlogger.New(
 		log.New(os.Stdout, "\r\n", log.LstdFlags),
 		gormlogger.Config{
-			SlowThreshold:             200 * time.Millisecond,
+			SlowThreshold:             500 * time.Millisecond,
 			LogLevel:                  gormlogger.Warn,
 			IgnoreRecordNotFoundError: true,
-			Colorful:                  true,
+			Colorful:                  false,
 		},
 	)
 
