@@ -57,16 +57,16 @@ func (s *UserService) ListAllUsers(ctx context.Context) ([]*model.SysUser, error
 	return s.userRepo.FindAll(ctx)
 }
 
-// InitDefaultUsers 初始化默认超级管理员和管理员 (对齐 Java UserService.@PostConstruct initDefaultUsers)
+// InitDefaultUsers 初始化默认超级管理员和管理员 (读取配置中的超级管理员账号与密码)
 func (s *UserService) InitDefaultUsers(ctx context.Context, defaultSuperAdminUsername, defaultSuperAdminPassword string) error {
 	if defaultSuperAdminUsername == "" {
-		defaultSuperAdminUsername = "superadmin"
+		defaultSuperAdminUsername = "super"
 	}
 	if defaultSuperAdminPassword == "" {
-		defaultSuperAdminPassword = "@superadmin666"
+		defaultSuperAdminPassword = "@super"
 	}
 
-	// 1. 初始化或升级默认超级管理员 superadmin (SUPER_ADMIN)
+	// 1. 初始化或升级配置中的超级管理员 (SUPER_ADMIN)
 	superAdmin, err := s.userRepo.FindByUsername(ctx, defaultSuperAdminUsername)
 	if err != nil || superAdmin == nil {
 		newSuper := &model.SysUser{
@@ -83,6 +83,15 @@ func (s *UserService) InitDefaultUsers(ctx context.Context, defaultSuperAdminUse
 		if !superAdmin.IsSuperAdmin() {
 			superAdmin.Role = model.RoleSuperAdmin
 			_ = s.userRepo.Update(ctx, superAdmin)
+		}
+	}
+
+	// 自动清理此前代码硬编码历史遗留且密码未变更的冗余 superadmin 账号
+	if defaultSuperAdminUsername != "superadmin" {
+		if oldSuper, err := s.userRepo.FindByUsername(ctx, "superadmin"); err == nil && oldSuper != nil {
+			if oldSuper.PasswordHash == HashPassword("@superadmin666") {
+				_ = s.userRepo.Delete(ctx, oldSuper.ID)
+			}
 		}
 	}
 

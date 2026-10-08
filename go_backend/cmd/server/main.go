@@ -78,7 +78,7 @@ func main() {
 
 	// 6. 初始化业务服务层
 	userSvc := service.NewUserService(userRepo, orderRepo, flicknovelRepo)
-	_ = userSvc.InitDefaultUsers(context.Background(), "superadmin", "@superadmin666")
+	_ = userSvc.InitDefaultUsers(context.Background(), cfg.App.Auth.Username, cfg.App.Auth.Password)
 	permSvc := service.NewUserPermissionService(userRepo)
 	predictSvc := service.NewPredictService(benchmarkRepo)
 	predictSvc.SetDependencies(orderRepo, userRepo, userSvc)

@@ -108,6 +108,12 @@ func LoadConfig(configPath string) (*Config, error) {
 	if cfg.Server.Port == 0 {
 		cfg.Server.Port = 8080
 	}
+	if cfg.App.Auth.Username == "" {
+		cfg.App.Auth.Username = "super"
+	}
+	if cfg.App.Auth.Password == "" {
+		cfg.App.Auth.Password = "@super"
+	}
 	if cfg.App.Auth.SecretKey == "" {
 		cfg.App.Auth.SecretKey = "zw-ltv-secret-auth-key-2026-v2"
 	}
