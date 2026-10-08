@@ -47,7 +47,7 @@ export default function LtvHeader({
             <BarChart3 size={22} />
           </div>
           <div>
-            <h1 className="brand-title">DataHub</h1>
+            <h1 className="brand-title">DataLens</h1>
           </div>
         </div>
 

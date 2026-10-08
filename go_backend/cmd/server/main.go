@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -46,9 +47,15 @@ func main() {
 	defer logInstance.Sync()
 	logger := logInstance
 
-	logger.Info("Starting LTV-STAT-SYSTEM Go Backend...")
+	logger.Info("Starting DataLens (data-lens) Go Backend...")
 
 	// 3. 初始化数据库连接池
+	maskedDSN := cfg.Database.MySQL.DSN
+	if atIdx := strings.Index(maskedDSN, "@"); atIdx != -1 {
+		maskedDSN = "***@" + maskedDSN[atIdx+1:]
+	}
+	logger.Info("Connecting to MySQL...", zap.String("target", maskedDSN))
+
 	db, err := repository.InitDB(&cfg.Database.MySQL)
 	if err != nil {
 		logger.Fatal("Init database failed", zap.Error(err))

@@ -76,7 +76,11 @@ export default function AppTopBar({
           <Menu size={20} />
         </button>
 
-        <div className="topbar-page-badge">
+        <div className="topbar-brand-group">
+          <span className="topbar-brand-title">DataLens</span>
+          <span className="topbar-brand-separator">|</span>
+          <span className="topbar-brand-subtitle">全域 LTV 与投流分析中台</span>
+          <span className="topbar-brand-separator">/</span>
           <span className="topbar-page-title">{pageTitle}</span>
         </div>
       </div>

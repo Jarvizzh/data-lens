@@ -54,8 +54,8 @@ export default function Login({ onLoginSuccess }) {
           <div className="login-brand-icon">
             <ShieldCheck size={28} color="#ffffff" />
           </div>
-          <h2 className="login-title">DataHub 数据平台</h2>
-          <p className="login-subtitle">请登录账号以访问您的多平台业务数据</p>
+          <h2 className="login-title">DataLens</h2>
+          <p className="login-subtitle">全域 LTV 与投流分析中台</p>
         </div>
 
         <form onSubmit={handleSubmit} className="login-form">

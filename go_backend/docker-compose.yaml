@@ -1,21 +1,30 @@
 version: '3.8'
 
 services:
-  ltv-server:
-    image: ltv-server:latest
-    container_name: ltv-server
+  data-lens-server:
+    image: data-lens-server:latest
+    container_name: data-lens-server
     restart: always
-    ports:
-      - "8098:8098"
+
+    # 核心配置: 使用 host 网络模式 (Linux 环境下最推荐)
+    # 作用: 容器与宿主机共用网络栈，容器内访问 localhost:3306 直接连通宿主机本地 MySQL，
+    # 同时服务监听的 8098 端口直接在宿主机生效，无任何网络损耗，也不需要 ports 端口映射。
+    network_mode: "host"
+
     volumes:
-      # 挂载宿主机外部配置文件 (默认优先挂载生产配置，若无则使用 config.yaml)
+      # 挂载宿主机外部配置文件
       - ./configs/config.production.yaml:/app/configs/config.yaml:ro
-      # 如果需要挂载日志目录，可在此配置
-      # - ./logs:/app/logs
+      # 挂载日志目录到宿主机当前目录下的 logs/
+      - ./logs:/app/logs
+
     environment:
       - TZ=Asia/Shanghai
       - SERVER_PORT=8098
       - CONFIG_PATH=/app/configs/config.yaml
+
+    # 启动命令: 通过 tee 将控制台日志实时落盘到挂载目录下的 app.log，同时保留 docker logs 输出
+    entrypoint: ["/bin/sh", "-c", "/app/server 2>&1 | tee -a /app/logs/app.log"]
+
     logging:
       driver: "json-file"
       options:

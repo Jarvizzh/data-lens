@@ -32,3 +32,9 @@ backend/src/main/resources/static/
 # Temporary & Log files
 scratch/
 *.tmp
+
+# Go Backend build outputs
+go_backend/dist/
+go_backend/server
+go_backend/server-*
+*.tar.gz

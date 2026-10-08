@@ -1,5 +1,0 @@
-server
-server-*
-*.tar.gz
-dist/
-.DS_Store

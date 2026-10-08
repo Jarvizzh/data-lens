@@ -101,6 +101,10 @@ func LoadConfig(configPath string) (*Config, error) {
 		}
 	}
 
+	if dsnEnv := os.Getenv("MYSQL_DSN"); dsnEnv != "" {
+		cfg.Database.MySQL.DSN = dsnEnv
+	}
+
 	if cfg.Server.Port == 0 {
 		cfg.Server.Port = 8080
 	}

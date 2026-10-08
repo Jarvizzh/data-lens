@@ -110,7 +110,7 @@ export default function AppSidebar({
             <div className="sidebar-brand-icon">
               <BarChart3 size={17} />
             </div>
-            {isExpanded && <span className="sidebar-brand-text">DataHub</span>}
+            {isExpanded && <span className="sidebar-brand-text">DataLens</span>}
           </div>
           {isExpanded && (
             <div className="sidebar-brand-toggle-btn" title="收起侧边栏">
@@ -339,7 +339,7 @@ export default function AppSidebar({
                 <div className="sidebar-brand-icon" style={{ width: '28px', height: '28px' }}>
                   <BarChart3 size={18} />
                 </div>
-                <span className="brand-title" style={{ fontSize: '1.1rem' }}>DataHub</span>
+                <span className="brand-title" style={{ fontSize: '1.1rem' }}>DataLens</span>
               </div>
               <button
                 className="theme-toggle-btn"
