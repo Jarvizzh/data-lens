@@ -1,6 +1,6 @@
 # 预测回本模型（Payback Prediction Model）详解
 
-本文档详细说明 `ltv-stat-system` 统计与预测系统针对 **海外 H5 小说投放（Overseas H5 Web Novel Ad Campaigns）** 业务场景下的 **预测回本模型（Payback Prediction Model）** 的业务背景、数学原理、算法推导步骤、模块解耦架构设计与边界防守机制。
+本文档详细说明 `data-lens` 统计与预测系统针对 **海外 H5 小说投放（Overseas H5 Web Novel Ad Campaigns）** 业务场景下的 **预测回本模型（Payback Prediction Model）** 的业务背景、数学原理、算法推导步骤、模块解耦架构设计与边界防守机制。
 
 ---
 
