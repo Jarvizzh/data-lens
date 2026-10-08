@@ -774,43 +774,13 @@ body {
   margin: 0 0.1rem;
 }
 
-.topbar-brand-group {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  user-select: none;
-}
-
-.topbar-brand-title {
-  font-size: 1.15rem;
-  font-weight: 800;
-  letter-spacing: -0.02em;
-  background: linear-gradient(135deg, #38bdf8, #818cf8);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.topbar-brand-separator {
-  color: var(--border-color);
-  opacity: 0.5;
-  font-size: 0.95rem;
-  font-weight: 300;
-}
-
-.topbar-brand-subtitle {
-  font-size: 0.88rem;
-  font-weight: 500;
-  color: var(--text-sub);
-  letter-spacing: -0.01em;
-}
-
 .topbar-page-badge {
   display: flex;
   align-items: center;
 }
 
 .topbar-page-title {
-  font-size: 0.95rem;
+  font-size: 1.05rem;
   font-weight: 600;
   color: var(--text-main);
   letter-spacing: -0.01em;
@@ -2582,8 +2552,7 @@ input[type="number"] {
     display: flex !important;
   }
 
-  /* 移动端顶部导航紧凑显示 */
-  .topbar-brand-subtitle,
+  /* 移动端顶部导航不显示页面标题 (如 LTV核心报表等) */
   .topbar-page-badge,
   .topbar-page-title {
     display: none !important;
