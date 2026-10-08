@@ -1,0 +1,37 @@
+server:
+  port: 8080
+
+database:
+  mysql:
+    dsn: "root:123456@tcp(localhost:3306)/meta_ltv?charset=utf8mb4&parseTime=True&loc=Asia%2FShanghai"
+    max_idle_conns: 10
+    max_open_conns: 50
+    conn_max_lifetime_min: 30
+
+order:
+  api:
+    url: "https://admin-api.rocnovel.com/ad/recharge/order/report/list"
+    authorization: "0451eaf3-dd00-499d-87b7-de4be2d18a43"
+    cookie: "JSESSIONID=b959ba11-507c-4f63-8a01-b16ab37f96f4"
+    client_group_id: "405323222546395136"
+
+flicknovel:
+  api:
+    base_url: "https://openapi.sinan-partner.com"
+    company_id: "355549587538358272"
+    private_key: "ymcPnTqpiQOAtROHJoeegoovJxS7wv6t0HLDUv5q3/G4qry6yKcvjYwhrBqwuEIMjfXMIIqDe0YUPu9JaPofMQ=="
+    default_email: "charles_z0@163.com"
+    default_dist_app_id: 2000019
+
+app:
+  auth:
+    username: "super"
+    password: "@super"
+    token_expire_days: 7
+    secret_key: "zw-ltv-secret-auth-key-2026-v2"
+
+logger:
+  level: "info"       # debug, info, warn, error (系统业务正常INFO日志正常打印；GIN常规200请求设为DEBUG自动过滤；4xx输出WARN；5xx输出ERROR)
+  format: "console"   # console (终端高可读彩色格式) | json (生产环境结构化采集)
+  show_caller: true   # 是否打印代码调用文件名与行号
+
