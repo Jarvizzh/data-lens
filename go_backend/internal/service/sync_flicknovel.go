@@ -190,81 +190,89 @@ func (m *SyncManager) populateTemplateContext(ctx context.Context, promotionID s
 // fetchRelationBeginTimes 拉取指定时间区间的染色归因记录，构建 relation_id -> relation_begin_time 字典，并自动持久化入库
 func (m *SyncManager) fetchRelationBeginTimes(ctx context.Context, beginTs, endTs int64) map[string]time.Time {
 	relationMap := make(map[string]time.Time)
-	pageIndex := int64(1)
 	pageSize := int64(1000)
+	stepSeconds := int64(25 * 86400) // 25 天步长分段，防范超过番茄司南网关 30 天时间跨度限制
 
-	for {
-		data, err := m.fnClient.QueryRelations(ctx, flicknovel.RelationQueryRequest{
-			BeginTs:  beginTs,
-			EndTs:    endTs,
-			Page:     pageIndex,
-			PageSize: pageSize,
-		})
-		if err != nil || data == nil || len(data.Relations) == 0 {
-			break
+	for segBegin := beginTs; segBegin < endTs; segBegin += stepSeconds {
+		segEnd := segBegin + stepSeconds
+		if segEnd > endTs {
+			segEnd = endTs
 		}
 
-		relations := make([]*model.FlicknovelRelation, 0, len(data.Relations))
-		for _, rec := range data.Relations {
-			rID := strings.TrimSpace(rec.RelationID)
-			if rID == "" {
-				continue
-			}
-
-			var regBj *time.Time
-			var regEt *time.Time
-			var regTs int64
-			regDateEt := ""
-
-			timeStr := strings.TrimSpace(rec.RelationBeginTime)
-			if sec, err := strconv.ParseInt(timeStr, 10, 64); err == nil && sec > 0 {
-				regTs = sec
-				bj := time.Unix(sec, 0).In(timeutil.BeijingZone)
-				regBj = &bj
-				et := bj.In(timeutil.EasternZone)
-				regEt = &et
-				regDateEt = et.Format(timeutil.DateLayout)
-				relationMap[rID] = bj
-			} else if t, err := time.ParseInLocation(timeutil.DateTimeLayout, timeStr, timeutil.BeijingZone); err == nil {
-				regBj = &t
-				regTs = t.Unix()
-				et := t.In(timeutil.EasternZone)
-				regEt = &et
-				regDateEt = et.Format(timeutil.DateLayout)
-				relationMap[rID] = t
-			}
-
-			rawPayload, _ := json.Marshal(rec)
-			relations = append(relations, &model.FlicknovelRelation{
-				RelationID:             rID,
-				DeviceID:               rec.DeviceID,
-				PromotionID:            rec.PromotionID,
-				PromotionCode:          rec.PromotionCode,
-				AdID:                   rec.AdID,
-				AdsetID:                rec.AdsetID,
-				CampaignID:             rec.CampaignID,
-				AdAccountID:            rec.AdAccountID,
-				RelationBeginTimeBJ:    regBj,
-				RelationBeginTimeET:    regEt,
-				RelationBeginDateET:    regDateEt,
-				RelationBeginTimestamp: regTs,
-				MediaChannel:           rec.MediaChannel,
-				Platform:               rec.Platform,
-				AppID:                  rec.AppID,
-				RawPayload:             string(rawPayload),
-				CreatedAt:              time.Now(),
-				UpdatedAt:              time.Now(),
+		pageIndex := int64(1)
+		for {
+			data, err := m.fnClient.QueryRelations(ctx, flicknovel.RelationQueryRequest{
+				BeginTs:  segBegin,
+				EndTs:    segEnd,
+				Page:     pageIndex,
+				PageSize: pageSize,
 			})
-		}
+			if err != nil || data == nil || len(data.Relations) == 0 {
+				break
+			}
 
-		if len(relations) > 0 && m.flicknovelRepo != nil {
-			_ = m.flicknovelRepo.BatchUpsertRelations(ctx, relations)
-		}
+			relations := make([]*model.FlicknovelRelation, 0, len(data.Relations))
+			for _, rec := range data.Relations {
+				rID := strings.TrimSpace(rec.RelationID)
+				if rID == "" {
+					continue
+				}
 
-		if len(data.Relations) < int(pageSize) {
-			break
+				var regBj *time.Time
+				var regEt *time.Time
+				var regTs int64
+				regDateEt := ""
+
+				timeStr := strings.TrimSpace(rec.RelationBeginTime)
+				if sec, err := strconv.ParseInt(timeStr, 10, 64); err == nil && sec > 0 {
+					regTs = sec
+					bj := time.Unix(sec, 0).In(timeutil.BeijingZone)
+					regBj = &bj
+					et := bj.In(timeutil.EasternZone)
+					regEt = &et
+					regDateEt = et.Format(timeutil.DateLayout)
+					relationMap[rID] = bj
+				} else if t, err := time.ParseInLocation(timeutil.DateTimeLayout, timeStr, timeutil.BeijingZone); err == nil {
+					regBj = &t
+					regTs = t.Unix()
+					et := t.In(timeutil.EasternZone)
+					regEt = &et
+					regDateEt = et.Format(timeutil.DateLayout)
+					relationMap[rID] = t
+				}
+
+				rawPayload, _ := json.Marshal(rec)
+				relations = append(relations, &model.FlicknovelRelation{
+					RelationID:             rID,
+					DeviceID:               rec.DeviceID,
+					PromotionID:            rec.PromotionID,
+					PromotionCode:          rec.PromotionCode,
+					AdID:                   rec.AdID,
+					AdsetID:                rec.AdsetID,
+					CampaignID:             rec.CampaignID,
+					AdAccountID:            rec.AdAccountID,
+					RelationBeginTimeBJ:    regBj,
+					RelationBeginTimeET:    regEt,
+					RelationBeginDateET:    regDateEt,
+					RelationBeginTimestamp: regTs,
+					MediaChannel:           rec.MediaChannel,
+					Platform:               rec.Platform,
+					AppID:                  rec.AppID,
+					RawPayload:             string(rawPayload),
+					CreatedAt:              time.Now(),
+					UpdatedAt:              time.Now(),
+				})
+			}
+
+			if len(relations) > 0 && m.flicknovelRepo != nil {
+				_ = m.flicknovelRepo.BatchUpsertRelations(ctx, relations)
+			}
+
+			if len(data.Relations) < int(pageSize) {
+				break
+			}
+			pageIndex++
 		}
-		pageIndex++
 	}
 
 	return relationMap
@@ -871,88 +879,101 @@ func (m *SyncManager) SyncFlicknovelRelations(ctx context.Context, startDate, en
 		sDate, eDate = eDate, sDate
 	}
 
-	beginTs := sDate.Unix()
-	endTs := eDate.AddDate(0, 0, 1).Unix()
-
-	pageIndex := int64(1)
 	pageSize := int64(1000)
 	totalSynced := 0
 
-	for {
-		data, err := m.fnClient.QueryRelations(ctx, flicknovel.RelationQueryRequest{
-			BeginTs:  beginTs,
-			EndTs:    endTs,
-			Page:     pageIndex,
-			PageSize: pageSize,
-		})
-		if err != nil {
-			return totalSynced, fmt.Errorf("query flicknovel relations page %d failed: %w", pageIndex, err)
+	// 25 天分段滑动窗口拉取，防范超过番茄司南网关 30 天时间跨度限制 (错误码 900002)
+	currStart := sDate
+	for !currStart.After(eDate) {
+		currEnd := currStart.AddDate(0, 0, 24)
+		if currEnd.After(eDate) {
+			currEnd = eDate
 		}
 
-		if len(data.Relations) == 0 {
-			break
-		}
+		segStartStr := currStart.Format(timeutil.DateLayout)
+		segEndStr := currEnd.Format(timeutil.DateLayout)
+		beginTs := currStart.Unix()
+		endTs := currEnd.AddDate(0, 0, 1).Unix()
 
-		relations := make([]*model.FlicknovelRelation, 0, len(data.Relations))
-		for _, rec := range data.Relations {
-			var regBj *time.Time
-			var regEt *time.Time
-			var regTs int64
-			regDateEt := ""
-
-			timeStr := strings.TrimSpace(rec.RelationBeginTime)
-			if sec, err := strconv.ParseInt(timeStr, 10, 64); err == nil && sec > 0 {
-				regTs = sec
-				bj := time.Unix(sec, 0).In(timeutil.BeijingZone)
-				regBj = &bj
-				et := bj.In(timeutil.EasternZone)
-				regEt = &et
-				regDateEt = et.Format(timeutil.DateLayout)
-			} else if t, err := time.ParseInLocation(timeutil.DateTimeLayout, timeStr, timeutil.BeijingZone); err == nil {
-				regBj = &t
-				regTs = t.Unix()
-				et := t.In(timeutil.EasternZone)
-				regEt = &et
-				regDateEt = et.Format(timeutil.DateLayout)
-			}
-
-			if rec.RelationBeginTimestamp == 0 && regTs > 0 {
-				rec.RelationBeginTimestamp = regTs
-			}
-
-			rawPayload, _ := json.Marshal(rec)
-			relations = append(relations, &model.FlicknovelRelation{
-				RelationID:             rec.RelationID,
-				DeviceID:               rec.DeviceID,
-				PromotionID:            rec.PromotionID,
-				PromotionCode:          rec.PromotionCode,
-				AdID:                   rec.AdID,
-				AdsetID:                rec.AdsetID,
-				CampaignID:             rec.CampaignID,
-				AdAccountID:            rec.AdAccountID,
-				RelationBeginTimeBJ:    regBj,
-				RelationBeginTimeET:    regEt,
-				RelationBeginDateET:    regDateEt,
-				RelationBeginTimestamp: rec.RelationBeginTimestamp,
-				MediaChannel:           rec.MediaChannel,
-				Platform:               rec.Platform,
-				AppID:                  rec.AppID,
-				RawPayload:             string(rawPayload),
-				CreatedAt:              time.Now(),
-				UpdatedAt:              time.Now(),
+		pageIndex := int64(1)
+		for {
+			data, err := m.fnClient.QueryRelations(ctx, flicknovel.RelationQueryRequest{
+				BeginTs:  beginTs,
+				EndTs:    endTs,
+				Page:     pageIndex,
+				PageSize: pageSize,
 			})
+			if err != nil {
+				return totalSynced, fmt.Errorf("query flicknovel relations [%s ~ %s] page %d failed: %w", segStartStr, segEndStr, pageIndex, err)
+			}
+
+			if len(data.Relations) == 0 {
+				break
+			}
+
+			relations := make([]*model.FlicknovelRelation, 0, len(data.Relations))
+			for _, rec := range data.Relations {
+				var regBj *time.Time
+				var regEt *time.Time
+				var regTs int64
+				regDateEt := ""
+
+				timeStr := strings.TrimSpace(rec.RelationBeginTime)
+				if sec, err := strconv.ParseInt(timeStr, 10, 64); err == nil && sec > 0 {
+					regTs = sec
+					bj := time.Unix(sec, 0).In(timeutil.BeijingZone)
+					regBj = &bj
+					et := bj.In(timeutil.EasternZone)
+					regEt = &et
+					regDateEt = et.Format(timeutil.DateLayout)
+				} else if t, err := time.ParseInLocation(timeutil.DateTimeLayout, timeStr, timeutil.BeijingZone); err == nil {
+					regBj = &t
+					regTs = t.Unix()
+					et := t.In(timeutil.EasternZone)
+					regEt = &et
+					regDateEt = et.Format(timeutil.DateLayout)
+				}
+
+				if rec.RelationBeginTimestamp == 0 && regTs > 0 {
+					rec.RelationBeginTimestamp = regTs
+				}
+
+				rawPayload, _ := json.Marshal(rec)
+				relations = append(relations, &model.FlicknovelRelation{
+					RelationID:             rec.RelationID,
+					DeviceID:               rec.DeviceID,
+					PromotionID:            rec.PromotionID,
+					PromotionCode:          rec.PromotionCode,
+					AdID:                   rec.AdID,
+					AdsetID:                rec.AdsetID,
+					CampaignID:             rec.CampaignID,
+					AdAccountID:            rec.AdAccountID,
+					RelationBeginTimeBJ:    regBj,
+					RelationBeginTimeET:    regEt,
+					RelationBeginDateET:    regDateEt,
+					RelationBeginTimestamp: rec.RelationBeginTimestamp,
+					MediaChannel:           rec.MediaChannel,
+					Platform:               rec.Platform,
+					AppID:                  rec.AppID,
+					RawPayload:             string(rawPayload),
+					CreatedAt:              time.Now(),
+					UpdatedAt:              time.Now(),
+				})
+			}
+
+			if err := m.flicknovelRepo.BatchUpsertRelations(ctx, relations); err != nil {
+				return totalSynced, fmt.Errorf("upsert flicknovel relations [%s ~ %s] failed: %w", segStartStr, segEndStr, err)
+			}
+
+			totalSynced += len(relations)
+
+			if len(data.Relations) < int(pageSize) {
+				break
+			}
+			pageIndex++
 		}
 
-		if err := m.flicknovelRepo.BatchUpsertRelations(ctx, relations); err != nil {
-			return totalSynced, fmt.Errorf("upsert flicknovel relations failed: %w", err)
-		}
-
-		totalSynced += len(relations)
-
-		if len(data.Relations) < int(pageSize) {
-			break
-		}
-		pageIndex++
+		currStart = currEnd.AddDate(0, 0, 1)
 	}
 
 	m.logger.Info("Finished Flicknovel relations sync",
