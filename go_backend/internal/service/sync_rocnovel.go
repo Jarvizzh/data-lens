@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go_backend/internal/model"
+	"go_backend/internal/pkg/pool"
 	"go_backend/internal/pkg/timeutil"
 	"go_backend/internal/service/client/rocnovel"
 
@@ -171,59 +172,141 @@ func (m *SyncManager) SyncRocnovelOrders(ctx context.Context, startTime, endTime
 	)
 
 	startSyncTime := time.Now()
-	concurrency := 8
-	sem := make(chan struct{}, concurrency)
-	var wg sync.WaitGroup
 	var completedDays atomic.Int64
 	var tokenExpired atomic.Bool
 	var firstErr error
 	var errOnce sync.Once
 
-	var allOrdersMu sync.Mutex
-	var allOrders []*model.RawOrder
+	var failedDaysMu sync.Mutex
+	var failedDays []string
 
-	for _, day := range targetDays {
+	totalSaved := 0
+	chunkSize := 7 // 7 天一个批次流水线入库，彻底防止多日甚至多月拉取导致内存膨胀，同时各批次内防死锁排序
+
+	for chunkStart := 0; chunkStart < len(targetDays); chunkStart += chunkSize {
 		if tokenExpired.Load() || ctx.Err() != nil {
 			break
 		}
+		chunkEnd := chunkStart + chunkSize
+		if chunkEnd > len(targetDays) {
+			chunkEnd = len(targetDays)
+		}
+		daysChunk := targetDays[chunkStart:chunkEnd]
 
-		sem <- struct{}{}
-		wg.Add(1)
+		var chunkOrders []*model.RawOrder
+		var chunkOrdersMu sync.Mutex
+		var wg sync.WaitGroup
 
-		go func(dayStr string) {
-			defer func() {
-				<-sem
-				wg.Done()
-			}()
-
+		for _, day := range daysChunk {
 			if tokenExpired.Load() || ctx.Err() != nil {
-				return
+				break
 			}
 
-			// 并行拉取该天所有页的订单
-			orders, err := m.fetchRocnovelOrdersForDay(ctx, dayStr, auth, cookie)
-			if err != nil {
-				if strings.Contains(err.Error(), "TOKEN_EXPIRED") {
-					tokenExpired.Store(true)
-					errOnce.Do(func() { firstErr = err })
-					m.logger.Warn("Rocnovel token expired during sync", zap.String("day", dayStr))
+			wg.Add(1)
+			dayStr := day
+			task := func() {
+				defer wg.Done()
+				if tokenExpired.Load() || ctx.Err() != nil {
 					return
 				}
-				if ctx.Err() == nil {
-					m.logger.Warn("Failed to fetch Rocnovel orders for day", zap.String("day", dayStr), zap.Error(err))
-				}
-			} else {
-				completedDays.Add(1)
-				if len(orders) > 0 {
-					allOrdersMu.Lock()
-					allOrders = append(allOrders, orders...)
-					allOrdersMu.Unlock()
+
+				// 并行拉取该天所有页的订单
+				orders, err := m.fetchRocnovelOrdersForDay(ctx, dayStr, auth, cookie)
+				if err != nil {
+					if strings.Contains(err.Error(), "TOKEN_EXPIRED") {
+						tokenExpired.Store(true)
+						errOnce.Do(func() { firstErr = err })
+						m.logger.Warn("Rocnovel token expired during sync", zap.String("day", dayStr))
+						return
+					}
+					if ctx.Err() == nil {
+						m.logger.Warn("Failed to fetch Rocnovel orders for day", zap.String("day", dayStr), zap.Error(err))
+						failedDaysMu.Lock()
+						failedDays = append(failedDays, dayStr)
+						failedDaysMu.Unlock()
+					}
+				} else {
+					completedDays.Add(1)
+					if len(orders) > 0 {
+						chunkOrdersMu.Lock()
+						chunkOrders = append(chunkOrders, orders...)
+						chunkOrdersMu.Unlock()
+					}
 				}
 			}
-		}(day)
-	}
 
-	wg.Wait()
+			tpPool := pool.GetThirdPartyPool()
+			if tpPool != nil {
+				if err := tpPool.Submit(fmt.Sprintf("fetchRocnovelOrders:%s", dayStr), task); err != nil {
+					pool.SafeGo(m.logger, fmt.Sprintf("fetchRocnovelOrdersFallback:%s", dayStr), task)
+				}
+			} else {
+				pool.SafeGo(m.logger, fmt.Sprintf("fetchRocnovelOrdersFallback:%s", dayStr), task)
+			}
+		}
+
+		wg.Wait()
+
+		if tokenExpired.Load() {
+			break
+		}
+
+		if len(chunkOrders) == 0 {
+			continue
+		}
+
+		// 工业级死锁防范：按主键/唯一索引 order_id 升序排序
+		sort.Slice(chunkOrders, func(i, j int) bool {
+			return chunkOrders[i].OrderID < chunkOrders[j].OrderID
+		})
+
+		// 无论外层请求上下文是否收到客户端中断，对内存中已拉取的宝贵数据执行脱钩保护写库，确保不丢失已抓取数据
+		writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+		batchSize := 200
+		for i := 0; i < len(chunkOrders); i += batchSize {
+			end := i + batchSize
+			if end > len(chunkOrders) {
+				end = len(chunkOrders)
+			}
+			batch := chunkOrders[i:end]
+
+			var batchErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				err := m.orderRepo.BatchUpsert(writeCtx, batch)
+				if err == nil {
+					totalSaved += len(batch)
+					batchErr = nil
+					// 维护首次订阅用户的周期配置表
+					for _, ord := range batch {
+						if ord.IsSubs == 1 && ord.RenewType == 1 {
+							m.saveOrUpdateUserSubscriptionPeriod(writeCtx, model.PlatformRocnovel, ord.MemberID, ord.LandingPageID, ord.OrderAmountCent, ord.RegisterTimeBJ)
+						}
+					}
+					break
+				}
+				batchErr = err
+				if strings.Contains(err.Error(), "1213") || strings.Contains(err.Error(), "Deadlock") || strings.Contains(err.Error(), "1205") {
+					m.logger.Warn("Deadlock/lock-wait encountered on batch upsert, retrying...",
+						zap.Int("attempt", attempt+1),
+						zap.Int("batch_start", i),
+						zap.Error(err),
+					)
+					time.Sleep(time.Duration(100*(attempt+1)) * time.Millisecond)
+					continue
+				}
+				break
+			}
+
+			if batchErr != nil {
+				cancelWrite()
+				m.logger.Error("Failed to upsert Rocnovel order batch", zap.Int("batch_start", i), zap.Error(batchErr))
+				return totalSaved, batchErr
+			}
+		}
+		cancelWrite()
+		// 释放当前分批订单切片给 GC
+		chunkOrders = nil
+	}
 
 	if tokenExpired.Load() {
 		m.logger.Error("Rocnovel order sync aborted due to token expired",
@@ -231,75 +314,25 @@ func (m *SyncManager) SyncRocnovelOrders(ctx context.Context, startTime, endTime
 			zap.Int("total_days", totalDays),
 		)
 		if firstErr != nil {
-			return 0, firstErr
+			return totalSaved, firstErr
 		}
-		return 0, fmt.Errorf("TOKEN_EXPIRED: 登录 Token 已过期，请在页面更新最新 Token")
-	}
-
-	if len(allOrders) == 0 {
-		m.logger.Info("No Rocnovel orders fetched in range",
-			zap.String("range", fmt.Sprintf("%s ~ %s", startStr, endStr)),
-		)
-		return 0, nil
-	}
-
-	// 工业级死锁防范：按主键/唯一索引 order_id 升序排序
-	sort.Slice(allOrders, func(i, j int) bool {
-		return allOrders[i].OrderID < allOrders[j].OrderID
-	})
-
-	// 无论外层请求上下文是否收到客户端中断，对内存中已拉取的宝贵数据执行脱钩保护写库，确保不丢失已抓取数据
-	writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
-	defer cancelWrite()
-
-	batchSize := 200
-	totalSaved := 0
-	for i := 0; i < len(allOrders); i += batchSize {
-		end := i + batchSize
-		if end > len(allOrders) {
-			end = len(allOrders)
-		}
-		batch := allOrders[i:end]
-
-		var batchErr error
-		for attempt := 0; attempt < 3; attempt++ {
-			err := m.orderRepo.BatchUpsert(writeCtx, batch)
-			if err == nil {
-				totalSaved += len(batch)
-				batchErr = nil
-				// 维护首次订阅用户的周期配置表
-				for _, ord := range batch {
-					if ord.IsSubs == 1 && ord.RenewType == 1 {
-						m.saveOrUpdateUserSubscriptionPeriod(writeCtx, model.PlatformRocnovel, ord.MemberID, ord.LandingPageID, ord.OrderAmountCent, ord.RegisterTimeBJ)
-					}
-				}
-				break
-			}
-			batchErr = err
-			if strings.Contains(err.Error(), "1213") || strings.Contains(err.Error(), "Deadlock") || strings.Contains(err.Error(), "1205") {
-				m.logger.Warn("Deadlock/lock-wait encountered on batch upsert, retrying...",
-					zap.Int("attempt", attempt+1),
-					zap.Int("batch_start", i),
-					zap.Error(err),
-				)
-				time.Sleep(time.Duration(100*(attempt+1)) * time.Millisecond)
-				continue
-			}
-			break
-		}
-
-		if batchErr != nil {
-			m.logger.Error("Failed to upsert Rocnovel order batch", zap.Int("batch_start", i), zap.Error(batchErr))
-			return totalSaved, batchErr
-		}
+		return totalSaved, fmt.Errorf("TOKEN_EXPIRED: 登录 Token 已过期，请在页面更新最新 Token")
 	}
 
 	m.logger.Info("Finished sorted batch Rocnovel order sync",
 		zap.String("platform", model.PlatformRocnovel),
 		zap.String("range", fmt.Sprintf("%s ~ %s", startStr, endStr)),
 		zap.Int("total_saved_orders", totalSaved),
+		zap.Int("failed_days_count", len(failedDays)),
 		zap.Duration("duration", time.Since(startSyncTime)),
 	)
+
+	if len(failedDays) > 0 {
+		m.logger.Warn("Rocnovel order sync finished with partial day failures",
+			zap.Strings("failed_days", failedDays),
+		)
+		return totalSaved, fmt.Errorf("sync rocnovel orders partially failed for %d days: %v", len(failedDays), failedDays)
+	}
 
 	return totalSaved, nil
 }
@@ -320,6 +353,9 @@ func (m *SyncManager) SyncRocnovelSubscribeConfigs(ctx context.Context) (int, er
 		resp, err := m.rocnovelClient.FetchLandingPagesPage(ctx, pageIndex, pageSize, auth, cookie)
 		if err != nil {
 			m.logger.Error("Failed to fetch Rocnovel landing page config list page", zap.Int("pageIndex", pageIndex), zap.Error(err))
+			if len(allPages) == 0 {
+				return 0, fmt.Errorf("fetch rocnovel landing page config list page %d failed: %w", pageIndex, err)
+			}
 			break
 		}
 		if resp != nil && resp.Code == 0 && resp.Data != nil {

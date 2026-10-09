@@ -7,9 +7,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go_backend/internal/model"
+	"go_backend/internal/pkg/pool"
 	"go_backend/internal/pkg/timeutil"
 	"go_backend/internal/service/client/flicknovel"
 
@@ -201,13 +203,34 @@ func (m *SyncManager) fetchRelationBeginTimes(ctx context.Context, beginTs, endT
 
 		pageIndex := int64(1)
 		for {
-			data, err := m.fnClient.QueryRelations(ctx, flicknovel.RelationQueryRequest{
-				BeginTs:  segBegin,
-				EndTs:    segEnd,
-				Page:     pageIndex,
-				PageSize: pageSize,
-			})
-			if err != nil || data == nil || len(data.Relations) == 0 {
+			var data *flicknovel.RelationQueryData
+			var err error
+			for attempt := 0; attempt < 2; attempt++ {
+				data, err = m.fnClient.QueryRelations(ctx, flicknovel.RelationQueryRequest{
+					BeginTs:  segBegin,
+					EndTs:    segEnd,
+					Page:     pageIndex,
+					PageSize: pageSize,
+				})
+				if err == nil {
+					break
+				}
+				if attempt == 0 && ctx.Err() == nil {
+					time.Sleep(300 * time.Millisecond)
+				}
+			}
+
+			if err != nil {
+				m.logger.Warn("Failed to query Flicknovel relations page during relation mapping build",
+					zap.Int64("page", pageIndex),
+					zap.Int64("begin_ts", segBegin),
+					zap.Int64("end_ts", segEnd),
+					zap.Error(err),
+				)
+				break
+			}
+
+			if data == nil || len(data.Relations) == 0 {
 				break
 			}
 
@@ -265,6 +288,10 @@ func (m *SyncManager) fetchRelationBeginTimes(ctx context.Context, beginTs, endT
 			}
 
 			if len(relations) > 0 && m.flicknovelRepo != nil {
+				// 按主键 relation_id 严格升序排序，杜绝并发写库时因乱序交叉加锁引发 MySQL Deadlock (1213)
+				sort.Slice(relations, func(i, j int) bool {
+					return relations[i].RelationID < relations[j].RelationID
+				})
 				_ = m.flicknovelRepo.BatchUpsertRelations(ctx, relations)
 			}
 
@@ -620,7 +647,87 @@ func (m *SyncManager) cleanSingleFlicknovelOrder(
 	}
 }
 
-// SyncFlicknovelOrders 同步番茄司南订单 (按 25 天自然区间分段拉取，对齐 Java 架构)
+type flicknovelSegmentTask struct {
+	Index    int
+	StartStr string
+	EndStr   string
+	BeginTs  int64
+	EndTs    int64
+}
+
+// splitFlicknovelSegments 将起止日期按 25 天自然区间切分为分段任务列表 (避免触发司南 30 天区间限制)
+func splitFlicknovelSegments(startDateParsed, endDateParsed time.Time) []flicknovelSegmentTask {
+	var segments []flicknovelSegmentTask
+	segIdx := 0
+	currStart := startDateParsed
+	for !currStart.After(endDateParsed) {
+		currEnd := currStart.AddDate(0, 0, 24)
+		if currEnd.After(endDateParsed) {
+			currEnd = endDateParsed
+		}
+
+		segments = append(segments, flicknovelSegmentTask{
+			Index:    segIdx,
+			StartStr: currStart.Format(timeutil.DateLayout),
+			EndStr:   currEnd.Format(timeutil.DateLayout),
+			BeginTs:  currStart.Unix(),
+			EndTs:    currEnd.AddDate(0, 0, 1).Unix(),
+		})
+		segIdx++
+		currStart = currEnd.AddDate(0, 0, 1)
+	}
+	return segments
+}
+
+type flicknovelSegmentResult struct {
+	Index           int
+	Orders          []flicknovel.OrderDto
+	RelationTimeMap map[string]time.Time
+	Err             error
+}
+
+// fetchOrdersForSegment 纯网络请求拉取分段内所有页的订单 DTO，不执行首充判定与写库
+func (m *SyncManager) fetchOrdersForSegment(ctx context.Context, beginTs, endTs int64, segStartStr, segEndStr string) ([]flicknovel.OrderDto, error) {
+	var allOrders []flicknovel.OrderDto
+	pageIndex := int64(1)
+	pageSize := int64(500)
+
+	for {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		data, err := m.fnClient.QueryOrders(ctx, flicknovel.OrderQueryRequest{
+			BeginTs:  beginTs,
+			EndTs:    endTs,
+			Page:     pageIndex,
+			PageSize: pageSize,
+		})
+		if err != nil {
+			m.logger.Error("Failed to query Flicknovel orders for segment page",
+				zap.String("segment", fmt.Sprintf("%s ~ %s", segStartStr, segEndStr)),
+				zap.Int64("page", pageIndex),
+				zap.Error(err),
+			)
+			return nil, fmt.Errorf("query flicknovel orders [%s ~ %s] page %d failed: %w", segStartStr, segEndStr, pageIndex, err)
+		}
+
+		if len(data.Orders) == 0 {
+			break
+		}
+
+		allOrders = append(allOrders, data.Orders...)
+
+		if len(data.Orders) < int(pageSize) {
+			break
+		}
+		pageIndex++
+	}
+
+	return allOrders, nil
+}
+
+// SyncFlicknovelOrders 同步番茄司南订单 (段级并发抓取 + 时间序列严格保序清洗入库)
 func (m *SyncManager) SyncFlicknovelOrders(ctx context.Context, startDate, endDate string) (int, error) {
 	if m.fnClient == nil {
 		return 0, fmt.Errorf("flicknovel client not configured")
@@ -655,76 +762,120 @@ func (m *SyncManager) SyncFlicknovelOrders(ctx context.Context, startDate, endDa
 		startDateParsed = endDateParsed
 	}
 
-	m.logger.Info("Starting Flicknovel order sync",
+	// 1. 切分为不超过 25 天的自然分段，避免触发番茄司南 30 天区间限制
+	segments := splitFlicknovelSegments(startDateParsed, endDateParsed)
+
+	totalSegments := len(segments)
+	m.logger.Info("Starting concurrent Flicknovel order sync",
 		zap.String("platform", model.PlatformFlicknovel),
 		zap.String("start_time", startStr),
 		zap.String("end_time", endStr),
+		zap.Int("total_segments", totalSegments),
 	)
 
 	startSyncTime := time.Now()
 	totalSynced := 0
+	var failedSegments []string
 
-	// 25 天分段拉取，避免大时间跨度查询被三方网关限流或超时
-	currStart := startDateParsed
-	for !currStart.After(endDateParsed) {
-		currEnd := currStart.AddDate(0, 0, 24)
-		if currEnd.After(endDateParsed) {
-			currEnd = endDateParsed
+	// 2. 滑动窗口受控并发 (每批 6 个分段，适配 ThirdPartyPool 8 容量，控内存并防三方限流)
+	windowSize := 6
+	for w := 0; w < totalSegments; w += windowSize {
+		if ctx.Err() != nil {
+			break
+		}
+		wEnd := w + windowSize
+		if wEnd > totalSegments {
+			wEnd = totalSegments
+		}
+		curSegments := segments[w:wEnd]
+		curResults := make([]*flicknovelSegmentResult, len(curSegments))
+		var wg sync.WaitGroup
+
+		// 阶段一：纯网络并发拉取本窗口所有分段数据 (无 DB 写入、无首充判定)
+		for i, seg := range curSegments {
+			wg.Add(1)
+			slotIdx := i
+			task := seg
+			fetchWorker := func() {
+				defer wg.Done()
+				if ctx.Err() != nil {
+					return
+				}
+				relMap := m.fetchRelationBeginTimes(ctx, task.BeginTs, task.EndTs)
+				orders, err := m.fetchOrdersForSegment(ctx, task.BeginTs, task.EndTs, task.StartStr, task.EndStr)
+				curResults[slotIdx] = &flicknovelSegmentResult{
+					Index:           task.Index,
+					Orders:          orders,
+					RelationTimeMap: relMap,
+					Err:             err,
+				}
+			}
+
+			tpPool := pool.GetThirdPartyPool()
+			if tpPool != nil {
+				if err := tpPool.Submit(fmt.Sprintf("fn_seg_fetch_%d", task.Index), fetchWorker); err != nil {
+					pool.SafeGo(m.logger, fmt.Sprintf("fn_seg_fallback_%d", task.Index), fetchWorker)
+				}
+			} else {
+				pool.SafeGo(m.logger, fmt.Sprintf("fn_seg_safego_%d", task.Index), fetchWorker)
+			}
 		}
 
-		segStartStr := currStart.Format(timeutil.DateLayout)
-		segEndStr := currEnd.Format(timeutil.DateLayout)
-		beginTs := currStart.Unix()
-		endTs := currEnd.AddDate(0, 0, 1).Unix()
+		wg.Wait()
 
-		// 预拉取本区间内的染色归因记录，构建 relation_id -> relation_begin_time 映射
-		relationTimeMap := m.fetchRelationBeginTimes(ctx, beginTs, endTs)
-
-		pageIndex := int64(1)
-		pageSize := int64(500)
-
-		for {
-			data, err := m.fnClient.QueryOrders(ctx, flicknovel.OrderQueryRequest{
-				BeginTs:  beginTs,
-				EndTs:    endTs,
-				Page:     pageIndex,
-				PageSize: pageSize,
-			})
-			if err != nil {
-				m.logger.Error("Failed to query Flicknovel orders",
-					zap.String("segment", fmt.Sprintf("%s ~ %s", segStartStr, segEndStr)),
-					zap.Int64("page", pageIndex),
-					zap.Error(err),
+		// 阶段二：严格按时间升序 (从过去到现在) 依次清洗入库，100% 确保用户首充/复充历史因果一致性
+		for i, seg := range curSegments {
+			res := curResults[i]
+			if res == nil || res.Err != nil {
+				var errDetail error
+				if res != nil {
+					errDetail = res.Err
+				} else {
+					errDetail = fmt.Errorf("task interrupted or returned nil result")
+				}
+				m.logger.Error("Flicknovel segment fetch failed",
+					zap.String("segment", fmt.Sprintf("%s ~ %s", seg.StartStr, seg.EndStr)),
+					zap.Error(errDetail),
 				)
-				return totalSynced, fmt.Errorf("query flicknovel orders [%s ~ %s] page %d failed: %w", segStartStr, segEndStr, pageIndex, err)
+				failedSegments = append(failedSegments, fmt.Sprintf("%s~%s", seg.StartStr, seg.EndStr))
+				continue
 			}
 
-			if len(data.Orders) == 0 {
-				break
+			if len(res.Orders) == 0 {
+				curResults[i] = nil
+				continue
 			}
 
-			// 执行批量清洗入库
-			cleaned, cleanErr := m.batchCleanAndSaveFlicknovelOrders(ctx, data.Orders, relationTimeMap)
+			cleaned, cleanErr := m.batchCleanAndSaveFlicknovelOrders(ctx, res.Orders, res.RelationTimeMap)
 			if cleanErr != nil {
+				m.logger.Error("Failed to clean and save Flicknovel orders for segment",
+					zap.String("segment", fmt.Sprintf("%s ~ %s", seg.StartStr, seg.EndStr)),
+					zap.Error(cleanErr),
+				)
 				return totalSynced, cleanErr
 			}
 			totalSynced += cleaned
 
-			if len(data.Orders) < int(pageSize) {
-				break
-			}
-			pageIndex++
+			// 及时释放内存切片给 GC
+			res.Orders = nil
+			curResults[i] = nil
 		}
-
-		currStart = currEnd.AddDate(0, 0, 1)
 	}
 
 	m.logger.Info("Finished Flicknovel order sync",
 		zap.String("platform", model.PlatformFlicknovel),
 		zap.String("range", fmt.Sprintf("%s ~ %s", startStr, endStr)),
 		zap.Int("total_saved_orders", totalSynced),
+		zap.Int("failed_segments_count", len(failedSegments)),
 		zap.Duration("duration", time.Since(startSyncTime)),
 	)
+
+	if len(failedSegments) > 0 {
+		m.logger.Warn("Flicknovel order sync finished with partial segment failures",
+			zap.Strings("failed_segments", failedSegments),
+		)
+		return totalSynced, fmt.Errorf("sync flicknovel orders partially failed for %d segments: %v", len(failedSegments), failedSegments)
+	}
 
 	return totalSynced, nil
 }
@@ -843,12 +994,100 @@ func (m *SyncManager) SyncFlicknovelPromotionsAndTemplates(ctx context.Context) 
 	return nil
 }
 
-// SyncFlicknovelRelations 同步番茄司南染色归因
+type flicknovelRelationResult struct {
+	Index     int
+	Relations []*model.FlicknovelRelation
+	Err       error
+}
+
+// fetchRelationsForSegment 纯网络请求拉取分段内所有页的染色记录并完成模型转换，不写数据库
+func (m *SyncManager) fetchRelationsForSegment(ctx context.Context, beginTs, endTs int64, segStartStr, segEndStr string) ([]*model.FlicknovelRelation, error) {
+	var allRelations []*model.FlicknovelRelation
+	pageIndex := int64(1)
+	pageSize := int64(1000)
+
+	for {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		data, err := m.fnClient.QueryRelations(ctx, flicknovel.RelationQueryRequest{
+			BeginTs:  beginTs,
+			EndTs:    endTs,
+			Page:     pageIndex,
+			PageSize: pageSize,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("query flicknovel relations [%s ~ %s] page %d failed: %w", segStartStr, segEndStr, pageIndex, err)
+		}
+
+		if len(data.Relations) == 0 {
+			break
+		}
+
+		for _, rec := range data.Relations {
+			var regBj *time.Time
+			var regEt *time.Time
+			var regTs int64
+			regDateEt := ""
+
+			timeStr := strings.TrimSpace(rec.RelationBeginTime)
+			if sec, err := strconv.ParseInt(timeStr, 10, 64); err == nil && sec > 0 {
+				regTs = sec
+				bj := time.Unix(sec, 0).In(timeutil.BeijingZone)
+				regBj = &bj
+				et := bj.In(timeutil.EasternZone)
+				regEt = &et
+				regDateEt = et.Format(timeutil.DateLayout)
+			} else if t, err := time.ParseInLocation(timeutil.DateTimeLayout, timeStr, timeutil.BeijingZone); err == nil {
+				regBj = &t
+				regTs = t.Unix()
+				et := t.In(timeutil.EasternZone)
+				regEt = &et
+				regDateEt = et.Format(timeutil.DateLayout)
+			}
+
+			if rec.RelationBeginTimestamp == 0 && regTs > 0 {
+				rec.RelationBeginTimestamp = regTs
+			}
+
+			rawPayload, _ := json.Marshal(rec)
+			allRelations = append(allRelations, &model.FlicknovelRelation{
+				RelationID:             rec.RelationID,
+				DeviceID:               rec.DeviceID,
+				PromotionID:            rec.PromotionID,
+				PromotionCode:          rec.PromotionCode,
+				AdID:                   rec.AdID,
+				AdsetID:                rec.AdsetID,
+				CampaignID:             rec.CampaignID,
+				AdAccountID:            rec.AdAccountID,
+				RelationBeginTimeBJ:    regBj,
+				RelationBeginTimeET:    regEt,
+				RelationBeginDateET:    regDateEt,
+				RelationBeginTimestamp: rec.RelationBeginTimestamp,
+				MediaChannel:           rec.MediaChannel,
+				Platform:               rec.Platform,
+				AppID:                  rec.AppID,
+				RawPayload:             string(rawPayload),
+				CreatedAt:              time.Now(),
+				UpdatedAt:              time.Now(),
+			})
+		}
+
+		if len(data.Relations) < int(pageSize) {
+			break
+		}
+		pageIndex++
+	}
+
+	return allRelations, nil
+}
+
+// SyncFlicknovelRelations 同步番茄司南染色归因 (段级并发抓取 + 批次写库防死锁)
 func (m *SyncManager) SyncFlicknovelRelations(ctx context.Context, startDate, endDate string) (int, error) {
 	if m.fnClient == nil {
 		return 0, fmt.Errorf("flicknovel client not configured")
 	}
-	m.logger.Info("Starting Flicknovel relations sync", zap.String("start_date", startDate), zap.String("end_date", endDate))
 	startTime := time.Now()
 
 	startStr := strings.TrimSpace(startDate)
@@ -879,107 +1118,129 @@ func (m *SyncManager) SyncFlicknovelRelations(ctx context.Context, startDate, en
 		sDate, eDate = eDate, sDate
 	}
 
-	pageSize := int64(1000)
+	// 1. 切分为不超过 25 天的自然分段，避免触发司南 30 天区间限制
+	segments := splitFlicknovelSegments(sDate, eDate)
+	totalSegments := len(segments)
+	m.logger.Info("Starting concurrent Flicknovel relations sync",
+		zap.String("start_date", startStr),
+		zap.String("end_date", endStr),
+		zap.Int("total_segments", totalSegments),
+	)
+
 	totalSynced := 0
+	var failedSegments []string
+	windowSize := 6
 
-	// 25 天分段滑动窗口拉取，防范超过番茄司南网关 30 天时间跨度限制 (错误码 900002)
-	currStart := sDate
-	for !currStart.After(eDate) {
-		currEnd := currStart.AddDate(0, 0, 24)
-		if currEnd.After(eDate) {
-			currEnd = eDate
+	for w := 0; w < totalSegments; w += windowSize {
+		if ctx.Err() != nil {
+			break
+		}
+		wEnd := w + windowSize
+		if wEnd > totalSegments {
+			wEnd = totalSegments
+		}
+		curSegments := segments[w:wEnd]
+		curResults := make([]*flicknovelRelationResult, len(curSegments))
+		var wg sync.WaitGroup
+
+		// 阶段一：纯网络并发拉取各分段染色明细
+		for i, seg := range curSegments {
+			wg.Add(1)
+			slotIdx := i
+			task := seg
+			fetchWorker := func() {
+				defer wg.Done()
+				if ctx.Err() != nil {
+					return
+				}
+				relations, err := m.fetchRelationsForSegment(ctx, task.BeginTs, task.EndTs, task.StartStr, task.EndStr)
+				curResults[slotIdx] = &flicknovelRelationResult{
+					Index:     task.Index,
+					Relations: relations,
+					Err:       err,
+				}
+			}
+
+			tpPool := pool.GetThirdPartyPool()
+			if tpPool != nil {
+				if err := tpPool.Submit(fmt.Sprintf("fn_rel_fetch_%d", task.Index), fetchWorker); err != nil {
+					pool.SafeGo(m.logger, fmt.Sprintf("fn_rel_fallback_%d", task.Index), fetchWorker)
+				}
+			} else {
+				pool.SafeGo(m.logger, fmt.Sprintf("fn_rel_safego_%d", task.Index), fetchWorker)
+			}
 		}
 
-		segStartStr := currStart.Format(timeutil.DateLayout)
-		segEndStr := currEnd.Format(timeutil.DateLayout)
-		beginTs := currStart.Unix()
-		endTs := currEnd.AddDate(0, 0, 1).Unix()
+		wg.Wait()
 
-		pageIndex := int64(1)
-		for {
-			data, err := m.fnClient.QueryRelations(ctx, flicknovel.RelationQueryRequest{
-				BeginTs:  beginTs,
-				EndTs:    endTs,
-				Page:     pageIndex,
-				PageSize: pageSize,
+		// 阶段二：分批写库，按 RelationID 升序排序防死锁
+		writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+		for i, seg := range curSegments {
+			res := curResults[i]
+			if res == nil || res.Err != nil {
+				var errDetail error
+				if res != nil {
+					errDetail = res.Err
+				} else {
+					errDetail = fmt.Errorf("task interrupted or returned nil result")
+				}
+				m.logger.Error("Flicknovel relation segment fetch failed",
+					zap.String("segment", fmt.Sprintf("%s ~ %s", seg.StartStr, seg.EndStr)),
+					zap.Error(errDetail),
+				)
+				failedSegments = append(failedSegments, fmt.Sprintf("%s~%s", seg.StartStr, seg.EndStr))
+				continue
+			}
+
+			if len(res.Relations) == 0 {
+				curResults[i] = nil
+				continue
+			}
+
+			// 排序防死锁
+			sort.Slice(res.Relations, func(p, q int) bool {
+				return res.Relations[p].RelationID < res.Relations[q].RelationID
 			})
-			if err != nil {
-				return totalSynced, fmt.Errorf("query flicknovel relations [%s ~ %s] page %d failed: %w", segStartStr, segEndStr, pageIndex, err)
-			}
 
-			if len(data.Relations) == 0 {
-				break
-			}
-
-			relations := make([]*model.FlicknovelRelation, 0, len(data.Relations))
-			for _, rec := range data.Relations {
-				var regBj *time.Time
-				var regEt *time.Time
-				var regTs int64
-				regDateEt := ""
-
-				timeStr := strings.TrimSpace(rec.RelationBeginTime)
-				if sec, err := strconv.ParseInt(timeStr, 10, 64); err == nil && sec > 0 {
-					regTs = sec
-					bj := time.Unix(sec, 0).In(timeutil.BeijingZone)
-					regBj = &bj
-					et := bj.In(timeutil.EasternZone)
-					regEt = &et
-					regDateEt = et.Format(timeutil.DateLayout)
-				} else if t, err := time.ParseInLocation(timeutil.DateTimeLayout, timeStr, timeutil.BeijingZone); err == nil {
-					regBj = &t
-					regTs = t.Unix()
-					et := t.In(timeutil.EasternZone)
-					regEt = &et
-					regDateEt = et.Format(timeutil.DateLayout)
+			if m.flicknovelRepo != nil {
+				batchSize := 500
+				for b := 0; b < len(res.Relations); b += batchSize {
+					bEnd := b + batchSize
+					if bEnd > len(res.Relations) {
+						bEnd = len(res.Relations)
+					}
+					chunk := res.Relations[b:bEnd]
+					if err := m.flicknovelRepo.BatchUpsertRelations(writeCtx, chunk); err != nil {
+						cancelWrite()
+						m.logger.Error("Failed to upsert Flicknovel relations batch",
+							zap.String("segment", fmt.Sprintf("%s ~ %s", seg.StartStr, seg.EndStr)),
+							zap.Error(err),
+						)
+						return totalSynced, fmt.Errorf("upsert flicknovel relations [%s ~ %s] failed: %w", seg.StartStr, seg.EndStr, err)
+					}
 				}
-
-				if rec.RelationBeginTimestamp == 0 && regTs > 0 {
-					rec.RelationBeginTimestamp = regTs
-				}
-
-				rawPayload, _ := json.Marshal(rec)
-				relations = append(relations, &model.FlicknovelRelation{
-					RelationID:             rec.RelationID,
-					DeviceID:               rec.DeviceID,
-					PromotionID:            rec.PromotionID,
-					PromotionCode:          rec.PromotionCode,
-					AdID:                   rec.AdID,
-					AdsetID:                rec.AdsetID,
-					CampaignID:             rec.CampaignID,
-					AdAccountID:            rec.AdAccountID,
-					RelationBeginTimeBJ:    regBj,
-					RelationBeginTimeET:    regEt,
-					RelationBeginDateET:    regDateEt,
-					RelationBeginTimestamp: rec.RelationBeginTimestamp,
-					MediaChannel:           rec.MediaChannel,
-					Platform:               rec.Platform,
-					AppID:                  rec.AppID,
-					RawPayload:             string(rawPayload),
-					CreatedAt:              time.Now(),
-					UpdatedAt:              time.Now(),
-				})
 			}
 
-			if err := m.flicknovelRepo.BatchUpsertRelations(ctx, relations); err != nil {
-				return totalSynced, fmt.Errorf("upsert flicknovel relations [%s ~ %s] failed: %w", segStartStr, segEndStr, err)
-			}
-
-			totalSynced += len(relations)
-
-			if len(data.Relations) < int(pageSize) {
-				break
-			}
-			pageIndex++
+			totalSynced += len(res.Relations)
+			// 及时释放内存切片给 GC
+			res.Relations = nil
+			curResults[i] = nil
 		}
-
-		currStart = currEnd.AddDate(0, 0, 1)
+		cancelWrite()
 	}
 
 	m.logger.Info("Finished Flicknovel relations sync",
 		zap.Int("total_saved_relations", totalSynced),
+		zap.Int("failed_segments_count", len(failedSegments)),
 		zap.Duration("duration", time.Since(startTime)),
 	)
+
+	if len(failedSegments) > 0 {
+		m.logger.Warn("Flicknovel relations sync finished with partial segment failures",
+			zap.Strings("failed_segments", failedSegments),
+		)
+		return totalSynced, fmt.Errorf("sync flicknovel relations partially failed for %d segments: %v", len(failedSegments), failedSegments)
+	}
 
 	return totalSynced, nil
 }

@@ -4,12 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -17,35 +15,18 @@ import (
 
 	"go_backend/internal/config"
 	"go_backend/internal/pkg/crypto"
+	"go_backend/internal/pkg/httpclient"
 )
 
 type Client struct {
-	httpClient *http.Client
+	httpClient *httpclient.Client
 	cfg        *config.FlicknovelAPI
 }
 
 func NewClient(cfg *config.FlicknovelAPI) *Client {
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   15 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   20,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
-	}
-
 	return &Client{
-		httpClient: &http.Client{
-			Transport: transport,
-			Timeout:   30 * time.Second,
-		},
-		cfg: cfg,
+		httpClient: httpclient.NewClient(),
+		cfg:        cfg,
 	}
 }
 

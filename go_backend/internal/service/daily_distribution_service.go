@@ -2,13 +2,17 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"time"
 
 	"go_backend/internal/model"
+	"go_backend/internal/pkg/pool"
 	"go_backend/internal/repository"
 	"go_backend/internal/service/dto"
 
 	"github.com/shopspring/decimal"
+	"golang.org/x/sync/singleflight"
 )
 
 type DailyDistributionService struct {
@@ -16,6 +20,7 @@ type DailyDistributionService struct {
 	orderRepo        *repository.OrderRepository
 	userRepo         *repository.UserRepository
 	calcSvc          *RechargeStatService
+	sfGroup          singleflight.Group
 }
 
 func NewDailyDistributionService(
@@ -32,7 +37,7 @@ func NewDailyDistributionService(
 	}
 }
 
-// GetDailyDistributionResponse 获取指定用户/平台的每日充值分布与汇总 (对应 Java LtvController.getDailyDistribution)
+// GetDailyDistributionResponse 获取指定用户/平台的每日充值分布与汇总 (对应 Java LtvController.getDailyDistribution, 集成 Singleflight 防重复计算)
 func (s *DailyDistributionService) GetDailyDistributionResponse(
 	ctx context.Context,
 	platformCode string,
@@ -46,6 +51,25 @@ func (s *DailyDistributionService) GetDailyDistributionResponse(
 		pCode = strings.ToLower(strings.TrimSpace(platformCode))
 	}
 
+	cacheKey := fmt.Sprintf("daily_dist:%s:%d", pCode, targetUserID)
+	// Singleflight 单飞折叠：使用脱钩 context.WithoutCancel(ctx) 挂载 60s 独立硬超时
+	val, err, _ := s.sfGroup.Do(cacheKey, func() (interface{}, error) {
+		calcCtx, cancelCalc := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+		defer cancelCalc()
+		return s.buildDailyDistributionResponse(calcCtx, pCode, targetUserID)
+	})
+	if err != nil {
+		return nil, err
+	}
+	// 返回的指针由调用层视作只读 (Immutable)，确保 Singleflight 并发共享安全
+	return val.(*dto.DailyDistributionResponseDto), nil
+}
+
+func (s *DailyDistributionService) buildDailyDistributionResponse(
+	ctx context.Context,
+	pCode string,
+	targetUserID int64,
+) (*dto.DailyDistributionResponseDto, error) {
 	platformStartDate := model.GetLaunchStartDateForPlatform(pCode)
 	userIDs := []int64{targetUserID}
 
@@ -103,15 +127,22 @@ func (s *DailyDistributionService) CalculateDailyDistributionForUser(ctx context
 		// 计算并持久化指定用户和平台的每日充值分布
 		_ = s.calcSvc.CalculateDailyDistributionForUserDirect(ctx, pCode, targetUserID)
 
-		// 异步触发所属主账号的每日充值分布重算 (后台 goroutine 执行，不阻塞当前请求，对应 Java asyncRecalculateMastersForSubUser)
-		go func(subUID int64, plat string) {
+		// 异步触发所属主账号的每日充值分布重算 (通过 BizPool 协程池执行，杜绝无界并发与单点 Panic)
+		bizPool := pool.GetBizPool()
+		taskName := fmt.Sprintf("recalc_daily_dist_masters_for_sub_%d_%s", targetUserID, pCode)
+		task := func() {
 			bgCtx := context.Background()
-			if masters, err := s.userRepo.FindMasterUserIDs(bgCtx, subUID); err == nil {
+			if masters, err := s.userRepo.FindMasterUserIDs(bgCtx, targetUserID); err == nil {
 				for _, mID := range masters {
-					_ = s.calcSvc.CalculateDailyDistributionForUserDirect(bgCtx, plat, mID)
+					_ = s.calcSvc.CalculateDailyDistributionForUserDirect(bgCtx, pCode, mID)
 				}
 			}
-		}(targetUserID, pCode)
+		}
+		if bizPool != nil {
+			_ = bizPool.Submit(taskName, task)
+		} else {
+			pool.SafeGo(nil, taskName, task)
+		}
 	}
 	return nil
 }

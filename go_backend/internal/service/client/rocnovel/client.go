@@ -6,40 +6,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"go_backend/internal/config"
+	"go_backend/internal/pkg/httpclient"
 )
 
 type Client struct {
-	httpClient *http.Client
+	httpClient *httpclient.Client
 	cfg        *config.RocnovelAPI
 }
 
 func NewClient(cfg *config.RocnovelAPI) *Client {
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   15 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   20,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
-
 	return &Client{
-		httpClient: &http.Client{
-			Transport: transport,
-			Timeout:   45 * time.Second,
-		},
-		cfg: cfg,
+		httpClient: httpclient.NewClient(),
+		cfg:        cfg,
 	}
 }
 
@@ -150,77 +133,48 @@ func (c *Client) FetchOrdersPage(ctx context.Context, pageIndex, pageSize int, s
 		return nil, err
 	}
 
-	var respBytes []byte
-	var lastErr error
-	maxRetries := 3
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, "POST", c.cfg.URL, bytes.NewReader(bodyBytes))
-		if err != nil {
-			return nil, err
-		}
-
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
-		req.Header.Set("Accept", "*/*")
-
-		activeAuth := strings.TrimSpace(auth)
-		if activeAuth == "" {
-			activeAuth = c.cfg.Authorization
-		}
-		if activeAuth != "" {
-			req.Header.Set("Authorization", activeAuth)
-		}
-
-		activeCookie := strings.TrimSpace(cookie)
-		if activeCookie == "" {
-			activeCookie = c.cfg.Cookie
-		}
-		if activeCookie != "" {
-			req.Header.Set("Cookie", activeCookie)
-		}
-
-		if c.cfg.ClientGroupID != "" {
-			req.Header.Set("client-group-id", c.cfg.ClientGroupID)
-		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			lastErr = err
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			time.Sleep(time.Duration(attempt*300) * time.Millisecond)
-			continue
-		}
-
-		b, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if err != nil {
-			lastErr = err
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			time.Sleep(time.Duration(attempt*300) * time.Millisecond)
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("http error code: %d, body: %s", resp.StatusCode, string(b))
-			if resp.StatusCode >= 500 || resp.StatusCode == 429 {
-				time.Sleep(time.Duration(attempt*300) * time.Millisecond)
-				continue
-			}
-			return nil, lastErr
-		}
-
-		respBytes = b
-		lastErr = nil
-		break
+	req, err := http.NewRequestWithContext(ctx, "POST", c.cfg.URL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, err
 	}
 
-	if lastErr != nil {
-		return nil, fmt.Errorf("do request failed: %w", lastErr)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "*/*")
+
+	activeAuth := strings.TrimSpace(auth)
+	if activeAuth == "" {
+		activeAuth = c.cfg.Authorization
+	}
+	if activeAuth != "" {
+		req.Header.Set("Authorization", activeAuth)
+	}
+
+	activeCookie := strings.TrimSpace(cookie)
+	if activeCookie == "" {
+		activeCookie = c.cfg.Cookie
+	}
+	if activeCookie != "" {
+		req.Header.Set("Cookie", activeCookie)
+	}
+
+	if c.cfg.ClientGroupID != "" {
+		req.Header.Set("client-group-id", c.cfg.ClientGroupID)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("do request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http error code: %d, body: %s", resp.StatusCode, string(respBytes))
 	}
 
 	var res OrderReportResponse
@@ -275,7 +229,7 @@ func (c *Client) FetchLandingPagesPage(ctx context.Context, pageIndex, pageSize 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch landing page list failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -327,7 +281,7 @@ func (c *Client) FetchSubscribeProductsForConfig(ctx context.Context, configID, 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch subscribe products failed: %w", err)
 	}
 	defer resp.Body.Close()
 

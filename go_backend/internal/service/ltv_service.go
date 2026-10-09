@@ -7,11 +7,13 @@ import (
 	"time"
 
 	"go_backend/internal/model"
+	"go_backend/internal/pkg/pool"
 	"go_backend/internal/pkg/timeutil"
 	"go_backend/internal/repository"
 	"go_backend/internal/service/dto"
 
 	"github.com/shopspring/decimal"
+	"golang.org/x/sync/singleflight"
 )
 
 type LtvService struct {
@@ -24,6 +26,7 @@ type LtvService struct {
 	cache             *LtvMemoryCache
 	monthlySummarySvc *MonthlySummaryService
 	rechargeDistSvc   *DailyDistributionService
+	sfGroup           singleflight.Group
 }
 
 func NewLtvService(
@@ -52,7 +55,7 @@ func (s *LtvService) SetRechargeDistService(distSvc *DailyDistributionService) {
 	s.rechargeDistSvc = distSvc
 }
 
-// GetLtvListResponse 兼容 Java 强类型 /api/ltv/list
+// GetLtvListResponse 兼容 Java 强类型 /api/ltv/list (集成 Singleflight 防缓存击穿与并发重复聚合)
 func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string, targetUserID int64) (*dto.LtvListResponseDto, error) {
 	if targetUserID <= 0 {
 		targetUserID = 1
@@ -71,6 +74,28 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 		}
 	}
 
+	// Singleflight 单飞折叠：并发的相同查询只执行一次计算，其余并发协程等待复用
+	// 关键防范：使用 context.WithoutCancel(ctx) 脱钩并挂载 60s 独立硬超时，
+	// 彻底杜绝领头客户端提前取消/关闭网页导致跟车等待的批次请求被连带 Cancel 报错
+	val, err, _ := s.sfGroup.Do(cacheKey, func() (interface{}, error) {
+		// 二次校验缓存，防止排队等待期间前序请求已填充缓存
+		if cached, ok := s.cache.Get(cacheKey); ok {
+			if resp, valid := cached.(*dto.LtvListResponseDto); valid {
+				return resp, nil
+			}
+		}
+		calcCtx, cancelCalc := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+		defer cancelCalc()
+		return s.buildLtvListResponse(calcCtx, targetPlatform, targetUserID, cacheKey)
+	})
+	if err != nil {
+		return nil, err
+	}
+	// 返回的指针由调用层视作只读 (Immutable)，确保 Singleflight 并发共享安全
+	return val.(*dto.LtvListResponseDto), nil
+}
+
+func (s *LtvService) buildLtvListResponse(ctx context.Context, targetPlatform string, targetUserID int64, cacheKey string) (*dto.LtvListResponseDto, error) {
 	startDate := s.calculator.GetLaunchStartDateForPlatform(targetPlatform)
 	stats, err := s.ltvStatRepo.FindStatsByFilter(ctx, targetPlatform, []int64{targetUserID}, startDate, "")
 	if err != nil {
@@ -475,34 +500,42 @@ func (s *LtvService) CalculateLtvStatsForUser(ctx context.Context, platformCode 
 	return nil
 }
 
-// asyncRecalculateMastersForSubUser 异步触发子账号关联的所有父级主账号进行报表重算 (LTV 报表 + 每日充值分布报表)
+// asyncRecalculateMastersForSubUser 异步触发子账号关联的所有父级主账号进行报表重算 (通过 BizPool 协程池执行，杜绝无界并发与单点 Panic)
 func (s *LtvService) asyncRecalculateMastersForSubUser(platformCode string, subUserID int64) {
 	if subUserID <= 0 {
 		return
 	}
-	go func(pCode string, subUID int64) {
+	taskName := fmt.Sprintf("recalc_masters_for_sub_%d_%s", subUserID, platformCode)
+	task := func() {
 		bgCtx := context.Background()
-		masters, err := s.userRepo.FindMasterUserIDs(bgCtx, subUID)
+		masters, err := s.userRepo.FindMasterUserIDs(bgCtx, subUserID)
 		if err != nil || len(masters) == 0 {
 			return
 		}
 
 		for _, mID := range masters {
 			// 1. 级联重算所属父级主账号的 LTV 报表 (当前平台 + ALL 平台)
-			_ = s.CalculateLtvStatsForUserDirect(bgCtx, pCode, mID)
+			_ = s.CalculateLtvStatsForUserDirect(bgCtx, platformCode, mID)
 			_ = s.CalculateLtvStatsForUserDirect(bgCtx, "all", mID)
 
 			// 2. 级联重算所属父级主账号的每日充值分布报表 (当前平台 + ALL 平台)
 			if s.rechargeDistSvc != nil {
-				_ = s.rechargeDistSvc.CalculateDailyDistributionForUser(bgCtx, pCode, mID)
+				_ = s.rechargeDistSvc.CalculateDailyDistributionForUser(bgCtx, platformCode, mID)
 				_ = s.rechargeDistSvc.CalculateDailyDistributionForUser(bgCtx, "all", mID)
 			}
 
 			// 3. 清理缓存
-			s.cache.Delete(fmt.Sprintf("%s:%d", pCode, mID))
+			s.cache.Delete(fmt.Sprintf("%s:%d", platformCode, mID))
 			s.cache.Delete(fmt.Sprintf("all:%d", mID))
 		}
-	}(platformCode, subUserID)
+	}
+
+	bizPool := pool.GetBizPool()
+	if bizPool != nil {
+		_ = bizPool.Submit(taskName, task)
+	} else {
+		pool.SafeGo(nil, taskName, task)
+	}
 }
 
 // CalculateAllLtvStats 计算所有用户的 LTV

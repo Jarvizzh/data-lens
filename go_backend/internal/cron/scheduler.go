@@ -23,6 +23,25 @@ type TaskScheduler struct {
 	logger      *zap.Logger
 }
 
+type cronZapLogger struct {
+	logger *zap.Logger
+}
+
+func newCronZapLogger(l *zap.Logger) cron.Logger {
+	if l == nil {
+		l = zap.NewNop()
+	}
+	return &cronZapLogger{logger: l.Named("cron")}
+}
+
+func (l *cronZapLogger) Info(msg string, keysAndValues ...interface{}) {
+	l.logger.Sugar().Infow(msg, keysAndValues...)
+}
+
+func (l *cronZapLogger) Error(err error, msg string, keysAndValues ...interface{}) {
+	l.logger.Sugar().Errorw(msg, append(keysAndValues, "error", err)...)
+}
+
 func NewTaskScheduler(
 	syncMgr *service.SyncManager,
 	ltvSvc *service.LtvService,
@@ -32,7 +51,14 @@ func NewTaskScheduler(
 	cache *service.LtvMemoryCache,
 	logger *zap.Logger,
 ) *TaskScheduler {
-	c := cron.New(cron.WithLocation(timeutil.BeijingZone))
+	cl := newCronZapLogger(logger)
+	c := cron.New(
+		cron.WithLocation(timeutil.BeijingZone),
+		cron.WithChain(
+			cron.Recover(cl),            // 捕获任务 panic，防止调度器循环崩溃
+			cron.SkipIfStillRunning(cl), // 若前序任务仍在执行，自动跳过本次调度，杜绝重叠！
+		),
+	)
 	return &TaskScheduler{
 		cron:        c,
 		syncMgr:     syncMgr,
@@ -162,8 +188,23 @@ func (s *TaskScheduler) Start() error {
 	return nil
 }
 
-func (s *TaskScheduler) Stop() {
-	if s.cron != nil {
-		s.cron.Stop()
+// StopWait 优雅停止定时调度器并等待在途任务执行完成
+func (s *TaskScheduler) StopWait(ctx context.Context) error {
+	if s.cron == nil {
+		return nil
 	}
+	s.logger.Info("Stopping task scheduler and waiting for in-flight jobs...")
+	cronCtx := s.cron.Stop()
+	select {
+	case <-cronCtx.Done():
+		s.logger.Info("Task scheduler stopped cleanly.")
+		return nil
+	case <-ctx.Done():
+		s.logger.Warn("Timed out waiting for in-flight cron jobs to finish during stop", zap.Error(ctx.Err()))
+		return ctx.Err()
+	}
+}
+
+func (s *TaskScheduler) Stop() {
+	_ = s.StopWait(context.Background())
 }

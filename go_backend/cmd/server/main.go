@@ -14,6 +14,7 @@ import (
 	"go_backend/internal/cron"
 	"go_backend/internal/handler"
 	"go_backend/internal/pkg/logger"
+	"go_backend/internal/pkg/pool"
 	"go_backend/internal/repository"
 	"go_backend/internal/service"
 	"go_backend/internal/service/client/flicknovel"
@@ -48,6 +49,9 @@ func main() {
 	logger := logInstance
 
 	logger.Info("Starting DataLens (data-lens) Go Backend...")
+
+	// 2.1 初始化全局业务协程池与三方 API 协程池 (舱壁隔离架构)
+	pool.InitGlobalPools(logger)
 
 	// 3. 初始化数据库连接池
 	maskedDSN := cfg.Database.MySQL.DSN
@@ -99,7 +103,6 @@ func main() {
 	if err := scheduler.Start(); err != nil {
 		logger.Error("Start task scheduler failed", zap.Error(err))
 	}
-	defer scheduler.Stop()
 
 	flicknovelHandler := handler.NewFlicknovelHandler(syncMgr, platformRepo)
 
@@ -129,16 +132,38 @@ func main() {
 		}
 	}()
 
-	// 10. 优雅停机
+	// 10. 优雅停机 (按依赖逆序平滑释放)
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	logger.Info("Shutting down server...")
+	logger.Info("Shutting down server gracefully...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// 对齐主流云原生 (K8s terminationGracePeriodSeconds) 标准，放宽优雅停机总超时至 30 秒
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		logger.Error("Server forced to shutdown", zap.Error(err))
+
+	// 10.1 停止接收新 HTTP 流量
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Error("HTTP server forced to shutdown", zap.Error(err))
+	} else {
+		logger.Info("HTTP server stopped cleanly.")
 	}
+
+	// 10.2 停止定时任务调度器并等待在途任务完成
+	if err := scheduler.StopWait(shutdownCtx); err != nil {
+		logger.Warn("Scheduler stop timed out or interrupted", zap.Error(err))
+	}
+
+	// 10.3 优雅关闭全局业务协程池与三方调用协程池，等待在途任务执行完成
+	if err := pool.ShutdownGlobal(shutdownCtx); err != nil {
+		logger.Warn("Worker pools shutdown timed out or interrupted", zap.Error(err))
+	}
+
+	// 10.4 释放数据库连接池
+	if sqlDB, err := db.DB(); err == nil {
+		_ = sqlDB.Close()
+		logger.Info("Database connection pool closed.")
+	}
+
 	logger.Info("Server exited cleanly.")
 }

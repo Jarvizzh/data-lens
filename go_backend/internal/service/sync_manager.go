@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go_backend/internal/model"
+	"go_backend/internal/pkg/pool"
 	"go_backend/internal/repository"
 	"go_backend/internal/service/client/flicknovel"
 	"go_backend/internal/service/client/rocnovel"
@@ -73,8 +74,8 @@ func NewSyncManager(
 	sm.RegisterSyncer(&rocnovelSyncer{manager: sm})
 	sm.RegisterSyncer(&flicknovelSyncer{manager: sm})
 
-	// 异步预热番茄司南模板价格字典缓存与中文在线落地页配置
-	go func() {
+	// 安全异步预热番茄司南模板价格字典缓存与中文在线落地页配置 (杜绝单点 panic 拖垮服务启动)
+	pool.SafeGo(sm.logger, "startup_cache_and_config_warmup", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		sm.initFlicknovelCache(ctx)
@@ -86,7 +87,7 @@ func NewSyncManager(
 		} else {
 			sm.logger.Error("Initial asynchronous Rocnovel subscribe config sync failed", zap.Error(err))
 		}
-	}()
+	})
 
 	return sm
 }
@@ -143,11 +144,12 @@ func (m *SyncManager) SyncOrdersForPlatform(ctx context.Context, platformCode, s
 
 	for _, s := range syncers {
 		wg.Add(1)
-		go func(syncer PlatformSyncer) {
+		syncer := s
+		pool.SafeGo(m.logger, fmt.Sprintf("syncOrders:%s", syncer.PlatformCode()), func() {
 			defer wg.Done()
 			cnt, err := syncer.SyncOrders(ctx, startTime, endTime)
 			resChan <- syncResult{count: cnt, err: err}
-		}(s)
+		})
 	}
 
 	wg.Wait()
@@ -197,11 +199,12 @@ func (m *SyncManager) SyncConfigsForPlatform(ctx context.Context, platformCode s
 
 	for _, s := range syncers {
 		wg.Add(1)
-		go func(syncer PlatformSyncer) {
+		syncer := s
+		pool.SafeGo(m.logger, fmt.Sprintf("syncConfigs:%s", syncer.PlatformCode()), func() {
 			defer wg.Done()
 			cnt, err := syncer.SyncConfigs(ctx)
 			resChan <- syncResult{count: cnt, err: err}
-		}(s)
+		})
 	}
 
 	wg.Wait()
