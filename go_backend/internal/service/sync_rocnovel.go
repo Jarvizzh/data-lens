@@ -111,12 +111,8 @@ func (m *SyncManager) syncRocnovelSingleDay(ctx context.Context, dayStr, auth, c
 	if err := m.orderRepo.BatchUpsert(ctx, orders); err != nil {
 		return 0, fmt.Errorf("upsert rocnovel orders for %s failed: %w", dayStr, err)
 	}
-	// 维护首次订阅用户的周期配置表
-	for _, ord := range orders {
-		if ord.IsSubs == 1 && ord.RenewType == 1 {
-			m.saveOrUpdateUserSubscriptionPeriod(ctx, model.PlatformRocnovel, ord.MemberID, ord.LandingPageID, ord.OrderAmountCent, ord.RegisterTimeBJ)
-		}
-	}
+	// 维护首次订阅用户的周期配置表 (批量单条 SQL 查询与写入，杜绝 N+1 数据库风暴)
+	m.BatchSaveOrUpdateSubscriptionPeriods(ctx, model.PlatformRocnovel, orders)
 	return len(orders), nil
 }
 
@@ -180,132 +176,124 @@ func (m *SyncManager) SyncRocnovelOrders(ctx context.Context, startTime, endTime
 	var failedDaysMu sync.Mutex
 	var failedDays []string
 
-	totalSaved := 0
-	chunkSize := 7 // 7 天一个批次流水线入库，彻底防止多日甚至多月拉取导致内存膨胀，同时各批次内防死锁排序
+	var allOrdersMu sync.Mutex
+	var allOrders []*model.RawOrder
+	var wg sync.WaitGroup
 
-	for chunkStart := 0; chunkStart < len(targetDays); chunkStart += chunkSize {
+	// 全量日期流水线并发抓取：利用 ThirdPartyPool (容量 15) 持续工作，彻底废除 7 天串行阻塞切片
+	for _, day := range targetDays {
 		if tokenExpired.Load() || ctx.Err() != nil {
 			break
 		}
-		chunkEnd := chunkStart + chunkSize
-		if chunkEnd > len(targetDays) {
-			chunkEnd = len(targetDays)
-		}
-		daysChunk := targetDays[chunkStart:chunkEnd]
 
-		var chunkOrders []*model.RawOrder
-		var chunkOrdersMu sync.Mutex
-		var wg sync.WaitGroup
-
-		for _, day := range daysChunk {
+		wg.Add(1)
+		dayStr := day
+		task := func() {
+			defer wg.Done()
 			if tokenExpired.Load() || ctx.Err() != nil {
-				break
+				return
 			}
 
-			wg.Add(1)
-			dayStr := day
-			task := func() {
-				defer wg.Done()
-				if tokenExpired.Load() || ctx.Err() != nil {
+			// 并行拉取该天所有页的订单
+			orders, err := m.fetchRocnovelOrdersForDay(ctx, dayStr, auth, cookie)
+			if err != nil {
+				if strings.Contains(err.Error(), "TOKEN_EXPIRED") {
+					tokenExpired.Store(true)
+					errOnce.Do(func() { firstErr = err })
+					m.logger.Warn("Rocnovel token expired during sync", zap.String("day", dayStr))
 					return
 				}
-
-				// 并行拉取该天所有页的订单
-				orders, err := m.fetchRocnovelOrdersForDay(ctx, dayStr, auth, cookie)
-				if err != nil {
-					if strings.Contains(err.Error(), "TOKEN_EXPIRED") {
-						tokenExpired.Store(true)
-						errOnce.Do(func() { firstErr = err })
-						m.logger.Warn("Rocnovel token expired during sync", zap.String("day", dayStr))
-						return
-					}
-					if ctx.Err() == nil {
-						m.logger.Warn("Failed to fetch Rocnovel orders for day", zap.String("day", dayStr), zap.Error(err))
-						failedDaysMu.Lock()
-						failedDays = append(failedDays, dayStr)
-						failedDaysMu.Unlock()
-					}
-				} else {
-					completedDays.Add(1)
-					if len(orders) > 0 {
-						chunkOrdersMu.Lock()
-						chunkOrders = append(chunkOrders, orders...)
-						chunkOrdersMu.Unlock()
-					}
-				}
-			}
-
-			tpPool := pool.GetThirdPartyPool()
-			if tpPool != nil {
-				if err := tpPool.Submit(fmt.Sprintf("fetchRocnovelOrders:%s", dayStr), task); err != nil {
-					pool.SafeGo(m.logger, fmt.Sprintf("fetchRocnovelOrdersFallback:%s", dayStr), task)
+				if ctx.Err() == nil {
+					m.logger.Warn("Failed to fetch Rocnovel orders for day", zap.String("day", dayStr), zap.Error(err))
+					failedDaysMu.Lock()
+					failedDays = append(failedDays, dayStr)
+					failedDaysMu.Unlock()
 				}
 			} else {
-				pool.SafeGo(m.logger, fmt.Sprintf("fetchRocnovelOrdersFallback:%s", dayStr), task)
+				completedDays.Add(1)
+				if len(orders) > 0 {
+					allOrdersMu.Lock()
+					allOrders = append(allOrders, orders...)
+					allOrdersMu.Unlock()
+				}
 			}
 		}
 
-		wg.Wait()
+		tpPool := pool.GetThirdPartyPool()
+		if tpPool != nil {
+			if err := tpPool.Submit(fmt.Sprintf("fetchRocnovelOrders:%s", dayStr), task); err != nil {
+				pool.SafeGo(m.logger, fmt.Sprintf("fetchRocnovelOrdersFallback:%s", dayStr), task)
+			}
+		} else {
+			pool.SafeGo(m.logger, fmt.Sprintf("fetchRocnovelOrdersFallback:%s", dayStr), task)
+		}
+	}
 
-		if tokenExpired.Load() {
+	wg.Wait()
+
+	if tokenExpired.Load() {
+		m.logger.Error("Rocnovel order sync aborted due to token expired",
+			zap.Int64("completed_days", completedDays.Load()),
+			zap.Int("total_days", totalDays),
+		)
+		if firstErr != nil {
+			return 0, firstErr
+		}
+		return 0, fmt.Errorf("TOKEN_EXPIRED: 登录 Token 已过期，请在页面更新最新 Token")
+	}
+
+	if len(allOrders) == 0 {
+		m.logger.Info("No Rocnovel orders fetched in range",
+			zap.String("range", fmt.Sprintf("%s ~ %s", startStr, endStr)),
+		)
+		return 0, nil
+	}
+
+	// 工业级死锁防范：按主键/唯一索引 order_id 升序排序
+	sort.Slice(allOrders, func(i, j int) bool {
+		return allOrders[i].OrderID < allOrders[j].OrderID
+	})
+
+	// 无论外层请求上下文是否收到客户端中断，对内存中已拉取的宝贵数据执行脱钩保护写库，确保不丢失已抓取数据
+	writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancelWrite()
+
+	batchSize := 500
+	totalSaved := 0
+	for i := 0; i < len(allOrders); i += batchSize {
+		end := i + batchSize
+		if end > len(allOrders) {
+			end = len(allOrders)
+		}
+		batch := allOrders[i:end]
+
+		var batchErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			err := m.orderRepo.BatchUpsert(writeCtx, batch)
+			if err == nil {
+				totalSaved += len(batch)
+				batchErr = nil
+				// 维护首次订阅用户的周期配置表 (批量单条 SQL 查询与写入，杜绝 N+1 数据库风暴)
+				m.BatchSaveOrUpdateSubscriptionPeriods(writeCtx, model.PlatformRocnovel, batch)
+				break
+			}
+			batchErr = err
+			if strings.Contains(err.Error(), "1213") || strings.Contains(err.Error(), "Deadlock") || strings.Contains(err.Error(), "1205") {
+				m.logger.Warn("Deadlock/lock-wait encountered on batch upsert, retrying...",
+					zap.Int("attempt", attempt+1),
+					zap.Int("batch_start", i),
+					zap.Error(err),
+				)
+				time.Sleep(time.Duration(100*(attempt+1)) * time.Millisecond)
+				continue
+			}
 			break
 		}
 
-		if len(chunkOrders) == 0 {
-			continue
+		if batchErr != nil {
+			m.logger.Error("Failed to upsert Rocnovel order batch", zap.Int("batch_start", i), zap.Error(batchErr))
+			return totalSaved, batchErr
 		}
-
-		// 工业级死锁防范：按主键/唯一索引 order_id 升序排序
-		sort.Slice(chunkOrders, func(i, j int) bool {
-			return chunkOrders[i].OrderID < chunkOrders[j].OrderID
-		})
-
-		// 无论外层请求上下文是否收到客户端中断，对内存中已拉取的宝贵数据执行脱钩保护写库，确保不丢失已抓取数据
-		writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
-		batchSize := 200
-		for i := 0; i < len(chunkOrders); i += batchSize {
-			end := i + batchSize
-			if end > len(chunkOrders) {
-				end = len(chunkOrders)
-			}
-			batch := chunkOrders[i:end]
-
-			var batchErr error
-			for attempt := 0; attempt < 3; attempt++ {
-				err := m.orderRepo.BatchUpsert(writeCtx, batch)
-				if err == nil {
-					totalSaved += len(batch)
-					batchErr = nil
-					// 维护首次订阅用户的周期配置表
-					for _, ord := range batch {
-						if ord.IsSubs == 1 && ord.RenewType == 1 {
-							m.saveOrUpdateUserSubscriptionPeriod(writeCtx, model.PlatformRocnovel, ord.MemberID, ord.LandingPageID, ord.OrderAmountCent, ord.RegisterTimeBJ)
-						}
-					}
-					break
-				}
-				batchErr = err
-				if strings.Contains(err.Error(), "1213") || strings.Contains(err.Error(), "Deadlock") || strings.Contains(err.Error(), "1205") {
-					m.logger.Warn("Deadlock/lock-wait encountered on batch upsert, retrying...",
-						zap.Int("attempt", attempt+1),
-						zap.Int("batch_start", i),
-						zap.Error(err),
-					)
-					time.Sleep(time.Duration(100*(attempt+1)) * time.Millisecond)
-					continue
-				}
-				break
-			}
-
-			if batchErr != nil {
-				cancelWrite()
-				m.logger.Error("Failed to upsert Rocnovel order batch", zap.Int("batch_start", i), zap.Error(batchErr))
-				return totalSaved, batchErr
-			}
-		}
-		cancelWrite()
-		// 释放当前分批订单切片给 GC
-		chunkOrders = nil
 	}
 
 	if tokenExpired.Load() {
@@ -404,6 +392,9 @@ func (m *SyncManager) SyncRocnovelSubscribeConfigs(ctx context.Context) (int, er
 		zap.Int("distinctConfigs", len(processedConfigIDs)),
 	)
 
+	if totalSavedVersions > 0 {
+		m.InvalidateSubscriptionConfigCache()
+	}
 	return totalSavedVersions, nil
 }
 

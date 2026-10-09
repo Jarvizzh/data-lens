@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/spf13/viper"
 )
@@ -73,7 +75,37 @@ type LoggerConfig struct {
 	ShowCaller bool   `mapstructure:"show_caller"`
 }
 
-var GlobalConfig Config
+var (
+	GlobalConfig    Config
+	globalConfigPtr atomic.Pointer[Config]
+	configMu        sync.RWMutex
+)
+
+// GetGlobalConfig 并发安全读取全局配置副本 (支持无锁高性能原子读取)
+func GetGlobalConfig() *Config {
+	if p := globalConfigPtr.Load(); p != nil {
+		return p
+	}
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return &GlobalConfig
+}
+
+// UpdateGlobalOrderAPI 线程安全更新订单三方认证参数并原子刷新全局配置
+func UpdateGlobalOrderAPI(auth, cookie string) {
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	curr := *GetGlobalConfig()
+	if strings.TrimSpace(auth) != "" {
+		curr.Order.API.Authorization = strings.TrimSpace(auth)
+	}
+	if strings.TrimSpace(cookie) != "" {
+		curr.Order.API.Cookie = strings.TrimSpace(cookie)
+	}
+	GlobalConfig = curr
+	globalConfigPtr.Store(&curr)
+}
 
 func LoadConfig(configPath string) (*Config, error) {
 	v := viper.New()
@@ -125,5 +157,6 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	GlobalConfig = cfg
+	globalConfigPtr.Store(&cfg)
 	return &cfg, nil
 }

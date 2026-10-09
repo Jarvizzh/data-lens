@@ -51,7 +51,7 @@ func (s *DailyDistributionService) GetDailyDistributionResponse(
 		pCode = strings.ToLower(strings.TrimSpace(platformCode))
 	}
 
-	cacheKey := fmt.Sprintf("daily_dist:%s:%d", pCode, targetUserID)
+	cacheKey := BuildDailyDistKey(pCode, targetUserID)
 	// Singleflight 单飞折叠：使用脱钩 context.WithoutCancel(ctx) 挂载 60s 独立硬超时
 	val, err, _ := s.sfGroup.Do(cacheKey, func() (interface{}, error) {
 		calcCtx, cancelCalc := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)

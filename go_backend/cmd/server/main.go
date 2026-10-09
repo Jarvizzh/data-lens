@@ -13,6 +13,7 @@ import (
 	"go_backend/internal/config"
 	"go_backend/internal/cron"
 	"go_backend/internal/handler"
+	"go_backend/internal/pkg/locker"
 	"go_backend/internal/pkg/logger"
 	"go_backend/internal/pkg/pool"
 	"go_backend/internal/repository"
@@ -66,6 +67,9 @@ func main() {
 	}
 	logger.Info("Database connected successfully.")
 
+	// 3.1 初始化分布式/进程内双层任务排他锁管理器
+	taskLocker := locker.NewTaskLocker(db, logger)
+
 	// 4. 初始化仓储层
 	userRepo := repository.NewUserRepository(db)
 	orderRepo := repository.NewOrderRepository(db)
@@ -98,22 +102,22 @@ func main() {
 	syncMgr := service.NewSyncManager(orderRepo, flicknovelRepo, platformRepo, rocnovelClient, flicknovelClient, logger)
 	settleSvc := service.NewSettlementService(settleRepo, orderRepo, userRepo, userSvc)
 
-	// 7. 启动定时任务调度器
-	scheduler := cron.NewTaskScheduler(syncMgr, ltvSvc, rechargeSvc, userSvc, predictSvc, ltvCache, logger)
+	// 7. 启动定时任务调度器 (传入 taskLocker 杜绝任务重叠与重入)
+	scheduler := cron.NewTaskScheduler(syncMgr, ltvSvc, rechargeSvc, userSvc, predictSvc, ltvCache, taskLocker, logger)
 	if err := scheduler.Start(); err != nil {
 		logger.Error("Start task scheduler failed", zap.Error(err))
 	}
 
-	flicknovelHandler := handler.NewFlicknovelHandler(syncMgr, platformRepo)
+	flicknovelHandler := handler.NewFlicknovelHandler(syncMgr, platformRepo, taskLocker)
 
 	// 8. 装配 HTTP 控制器与路由
 	r := handler.SetupRouter(handler.RouterParams{
 		AuthHandler:       handler.NewAuthHandler(userSvc),
-		LtvHandler:        handler.NewLtvHandler(ltvSvc, dailyDistSvc, permSvc, syncMgr, predictSvc),
+		LtvHandler:        handler.NewLtvHandler(ltvSvc, dailyDistSvc, permSvc, syncMgr, predictSvc, taskLocker),
 		UserHandler:       handler.NewUserHandler(userSvc, permSvc, ltvSvc),
 		AdminHandler:      handler.NewAdminHandler(userSvc, permSvc, ltvSvc),
 		SettlementHandler: handler.NewSettlementHandler(settleSvc, permSvc, userRepo),
-		PlatformHandler:   handler.NewPlatformHandler(platformRepo, userRepo, syncMgr),
+		PlatformHandler:   handler.NewPlatformHandler(platformRepo, userRepo, syncMgr, taskLocker),
 		TokenHandler:      handler.NewTokenHandler(rocnovelClient, platformRepo),
 		FlicknovelHandler: flicknovelHandler,
 		Logger:            logger,

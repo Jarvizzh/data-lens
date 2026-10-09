@@ -28,7 +28,7 @@ func AuthMiddleware() gin.HandlerFunc {
 			token = strings.TrimSpace(authHeader)
 		}
 
-		tokenInfo := crypto.ParseToken(token, config.GlobalConfig.App.Auth.SecretKey)
+		tokenInfo := crypto.ParseToken(token, config.GetGlobalConfig().App.Auth.SecretKey)
 		if !tokenInfo.Valid {
 			response.Unauthorized(c, "未登录或 Token 已过期 (3天)，请重新登录")
 			c.Abort()

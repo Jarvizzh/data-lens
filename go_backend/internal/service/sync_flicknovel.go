@@ -470,12 +470,8 @@ func (m *SyncManager) batchCleanAndSaveFlicknovelOrders(
 			if err == nil {
 				savedCount += len(batch)
 				batchErr = nil
-				// 维护首次订阅用户的周期配置表
-				for _, ord := range batch {
-					if ord.IsSubs == 1 && ord.RenewType == 1 {
-						m.saveOrUpdateUserSubscriptionPeriod(writeCtx, model.PlatformFlicknovel, ord.MemberID, ord.LandingPageID, ord.OrderAmountCent, ord.RegisterTimeBJ)
-					}
-				}
+				// 维护首次订阅用户的周期配置表 (批量单条 SQL 查询与写入，杜绝 N+1 数据库风暴)
+				m.BatchSaveOrUpdateSubscriptionPeriods(writeCtx, model.PlatformFlicknovel, batch)
 				break
 			}
 			batchErr = err

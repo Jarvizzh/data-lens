@@ -243,7 +243,15 @@ func (s *UserPermissionService) UpdateSettlementStatus(ctx context.Context, user
 }
 
 func (s *UserPermissionService) UpdateMasterSubAccounts(ctx context.Context, masterUserID int64, subUserIDs []int64) error {
-	return s.userRepo.ReplaceMasterSubAccounts(ctx, masterUserID, subUserIDs)
+	cleanIDs := make([]int64, 0, len(subUserIDs))
+	seen := make(map[int64]bool)
+	for _, sid := range subUserIDs {
+		if sid > 0 && sid != masterUserID && !seen[sid] {
+			seen[sid] = true
+			cleanIDs = append(cleanIDs, sid)
+		}
+	}
+	return s.userRepo.ReplaceMasterSubAccounts(ctx, masterUserID, cleanIDs)
 }
 
 func (s *UserPermissionService) GetSubUserIDsForMaster(ctx context.Context, masterUserID int64) ([]int64, error) {

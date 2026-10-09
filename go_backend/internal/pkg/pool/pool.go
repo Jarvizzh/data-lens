@@ -6,8 +6,14 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
+)
+
+const (
+	// DefaultSubmitTimeout 默认入队背压等待超时，杜绝通道满时永久死锁阻塞
+	DefaultSubmitTimeout = 5 * time.Second
 )
 
 var (
@@ -17,14 +23,15 @@ var (
 
 // WorkerPool 具有并发硬上限与缓冲队列的高性能安全协程池
 type WorkerPool struct {
-	name      string
-	capacity  int
-	queue     chan func()
-	wg        sync.WaitGroup
-	closed    atomic.Bool
-	running   atomic.Int32
-	logger    *zap.Logger
-	closeOnce sync.Once
+	name           string
+	capacity       int
+	queue          chan func()
+	defaultTimeout time.Duration
+	wg             sync.WaitGroup
+	closed         atomic.Bool
+	running        atomic.Int32
+	logger         *zap.Logger
+	closeOnce      sync.Once
 }
 
 // NewWorkerPool 创建指定名称、容量与队列深度的协程池
@@ -40,10 +47,11 @@ func NewWorkerPool(name string, capacity int, queueSize int, logger *zap.Logger)
 	}
 
 	p := &WorkerPool{
-		name:     name,
-		capacity: capacity,
-		queue:    make(chan func(), queueSize),
-		logger:   logger,
+		name:           name,
+		capacity:       capacity,
+		queue:          make(chan func(), queueSize),
+		defaultTimeout: DefaultSubmitTimeout,
+		logger:         logger,
 	}
 
 	// 预先拉起固定数量的常驻 Worker 协程
@@ -62,9 +70,51 @@ func NewWorkerPool(name string, capacity int, queueSize int, logger *zap.Logger)
 	return p
 }
 
-// Submit 提交异步任务，若队列满则阻塞直到有空闲槽位，内部自动注入 Panic 恢复保护
+// SetDefaultTimeout 设置默认入队超时时间
+func (p *WorkerPool) SetDefaultTimeout(timeout time.Duration) {
+	if timeout > 0 {
+		p.defaultTimeout = timeout
+	}
+}
+
+// Submit 提交异步任务，若队列满则在 defaultTimeout 时间内尝试入队；
+// 超时未入队则返回 ErrQueueTimeout，彻底消除队列满时的死锁挂起隐患
 func (p *WorkerPool) Submit(taskName string, fn func()) error {
-	return p.SubmitWithContext(context.Background(), taskName, fn)
+	ctx, cancel := context.WithTimeout(context.Background(), p.defaultTimeout)
+	defer cancel()
+	return p.SubmitWithContext(ctx, taskName, fn)
+}
+
+// TrySubmit 非阻塞快速入队，若队列已满或已关闭立即返回 false，零等待
+func (p *WorkerPool) TrySubmit(taskName string, fn func()) bool {
+	if fn == nil || p.closed.Load() {
+		return false
+	}
+	wrapped := func() {
+		SafeExecute(p.logger, fmt.Sprintf("%s:%s", p.name, taskName), fn)
+	}
+	select {
+	case p.queue <- wrapped:
+		return true
+	default:
+		return false
+	}
+}
+
+// SubmitWithFallback 带有调用方兜底（Caller-Runs）策略的提交方法
+// 若成功入队则异步执行；若队列已满或入队超时，自动降级在当前 Goroutine 同步执行，确保任务绝不丢失
+func (p *WorkerPool) SubmitWithFallback(taskName string, fn func()) {
+	if fn == nil {
+		return
+	}
+	if err := p.Submit(taskName, fn); err != nil {
+		p.logger.Warn("Worker queue saturated, falling back to synchronous execution (Caller-Runs)",
+			zap.String("pool", p.name),
+			zap.String("task", taskName),
+			zap.Error(err),
+		)
+		SafeExecute(p.logger, fmt.Sprintf("%s:%s[caller_fallback]", p.name, taskName), fn)
+	}
 }
 
 // SubmitWithContext 带超时/取消上下文的提交任务，内部杜绝向已关闭通道发送数据引发的 Panic 竞态
@@ -149,19 +199,31 @@ var (
 
 // InitGlobalPools 初始化全局业务协程池与三方 API 协程池
 func InitGlobalPools(logger *zap.Logger) {
+	InitGlobalPoolsWithCap(16, 15, logger)
+}
+
+// InitGlobalPoolsWithCap 支持指定容量初始化全局池
+func InitGlobalPoolsWithCap(bizCap, tpCap int, logger *zap.Logger) {
 	globalMu.Lock()
 	defer globalMu.Unlock()
 
-	// 1. 业务异步协程池：处理主账号级联重算、缓存异步失效等内部重计算 (容量 16, 队列 1024)
-	globalBizPool = NewWorkerPool("BizPool", 16, 1024, logger)
+	if bizCap <= 0 {
+		bizCap = 16
+	}
+	if tpCap <= 0 {
+		tpCap = 15
+	}
 
-	// 2. 三方调用协程池：处理中文在线/番茄司南外部 API 并发拉取 (容量 8, 队列 1024)
-	// 严格限制最大并发为 8，遵守三方接口风控配额，防爆三方网关
-	globalThirdPartyPool = NewWorkerPool("ThirdPartyPool", 8, 1024, logger)
+	// 1. 业务异步协程池：处理主账号级联重算、缓存异步失效等内部重计算 (默认容量 16, 队列 1024)
+	globalBizPool = NewWorkerPool("BizPool", bizCap, 1024, logger)
+
+	// 2. 三方调用协程池：处理中文在线/番茄司南外部 API 并发拉取 (容量 15, 队列 1024)
+	// 并发 15 既能跑满网络吞吐，又极其安全平稳防范三方网关限流
+	globalThirdPartyPool = NewWorkerPool("ThirdPartyPool", tpCap, 1024, logger)
 
 	logger.Info("Global worker pools initialized successfully",
-		zap.Int("biz_pool_cap", 16),
-		zap.Int("third_party_pool_cap", 8),
+		zap.Int("biz_pool_cap", bizCap),
+		zap.Int("third_party_pool_cap", tpCap),
 	)
 }
 

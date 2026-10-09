@@ -67,7 +67,7 @@ func (s *LtvService) GetLtvListResponse(ctx context.Context, platformCode string
 		targetPlatform = pCode
 	}
 
-	cacheKey := fmt.Sprintf("ltv:list:%s:%d", pCode, targetUserID)
+	cacheKey := BuildLtvListCacheKey(pCode, targetUserID)
 	if cached, ok := s.cache.Get(cacheKey); ok {
 		if resp, valid := cached.(*dto.LtvListResponseDto); valid {
 			return resp, nil
@@ -211,8 +211,9 @@ func (s *LtvService) CalculateLtvStatsForUserDirect(ctx context.Context, platfor
 	}
 	isMasterAcc := user.IsMaster == 1
 
-	s.cache.Delete(fmt.Sprintf("ltv:list:%s:%d", pCode, userID))
-	s.cache.Delete(fmt.Sprintf("ltv:list:all:%d", userID))
+	s.cache.InvalidateUser(userID)
+	s.cache.Delete(BuildLtvListCacheKey(pCode, userID))
+	s.cache.Delete(BuildLtvListCacheKey("all", userID))
 
 	userPages, lpIDs, err := s.userSvc.GetLandingPageConfigs(ctx, targetPlatform, userID)
 	if err != nil {
@@ -524,9 +525,10 @@ func (s *LtvService) asyncRecalculateMastersForSubUser(platformCode string, subU
 				_ = s.rechargeDistSvc.CalculateDailyDistributionForUser(bgCtx, "all", mID)
 			}
 
-			// 3. 清理缓存
-			s.cache.Delete(fmt.Sprintf("%s:%d", platformCode, mID))
-			s.cache.Delete(fmt.Sprintf("all:%d", mID))
+			// 3. 清理主账号缓存 (统一调用 InvalidateUser 彻底清理该主账号所有关联平台缓存，杜绝 Key 前缀不匹配)
+			s.cache.InvalidateUser(mID)
+			s.cache.Delete(BuildLtvListCacheKey(platformCode, mID))
+			s.cache.Delete(BuildLtvListCacheKey("all", mID))
 		}
 	}
 

@@ -31,8 +31,19 @@ func (h *TokenHandler) GetToken(c *gin.Context) {
 		return
 	}
 
-	auth := config.GlobalConfig.Order.API.Authorization
-	cookie := config.GlobalConfig.Order.API.Cookie
+	cfg := config.GetGlobalConfig()
+	auth := cfg.Order.API.Authorization
+	cookie := cfg.Order.API.Cookie
+
+	if h.rocnovelClient != nil {
+		cAuth, cCookie := h.rocnovelClient.GetCredentials()
+		if cAuth != "" {
+			auth = cAuth
+		}
+		if cCookie != "" {
+			cookie = cCookie
+		}
+	}
 
 	if h.platformRepo != nil {
 		if dbAuth, err := h.platformRepo.GetSystemConfig(c.Request.Context(), "API_AUTHORIZATION"); err == nil && dbAuth != "" {
@@ -65,15 +76,20 @@ func (h *TokenHandler) UpdateToken(c *gin.Context) {
 		return
 	}
 
-	if req.Authorization != "" {
-		config.GlobalConfig.Order.API.Authorization = req.Authorization
-		if h.platformRepo != nil {
+	// 1. 原子更新全局配置
+	config.UpdateGlobalOrderAPI(req.Authorization, req.Cookie)
+
+	// 2. 线程安全同步已初始化的客户端
+	if h.rocnovelClient != nil {
+		h.rocnovelClient.UpdateCredentials(req.Authorization, req.Cookie)
+	}
+
+	// 3. 持久化落库
+	if h.platformRepo != nil {
+		if req.Authorization != "" {
 			_ = h.platformRepo.SetSystemConfig(c.Request.Context(), "API_AUTHORIZATION", strings.TrimSpace(req.Authorization))
 		}
-	}
-	if req.Cookie != "" {
-		config.GlobalConfig.Order.API.Cookie = req.Cookie
-		if h.platformRepo != nil {
+		if req.Cookie != "" {
 			_ = h.platformRepo.SetSystemConfig(c.Request.Context(), "API_COOKIE", strings.TrimSpace(req.Cookie))
 		}
 	}

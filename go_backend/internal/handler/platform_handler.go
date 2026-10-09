@@ -2,9 +2,11 @@ package handler
 
 import (
 	"strings"
+	"time"
 
 	"go_backend/internal/middleware"
 	"go_backend/internal/model"
+	"go_backend/internal/pkg/locker"
 	"go_backend/internal/pkg/response"
 	"go_backend/internal/pkg/timeutil"
 	"go_backend/internal/repository"
@@ -17,17 +19,20 @@ type PlatformHandler struct {
 	platformRepo *repository.PlatformRepository
 	userRepo     *repository.UserRepository
 	syncMgr      *service.SyncManager
+	locker       *locker.TaskLocker
 }
 
 func NewPlatformHandler(
 	platformRepo *repository.PlatformRepository,
 	userRepo *repository.UserRepository,
 	syncMgr *service.SyncManager,
+	locker *locker.TaskLocker,
 ) *PlatformHandler {
 	return &PlatformHandler{
 		platformRepo: platformRepo,
 		userRepo:     userRepo,
 		syncMgr:      syncMgr,
+		locker:       locker,
 	}
 }
 
@@ -128,6 +133,12 @@ func (h *PlatformHandler) ListPlatforms(c *gin.Context) {
 }
 
 func (h *PlatformHandler) TriggerSync(c *gin.Context) {
+	unlock, ok := h.locker.GuardGin(c, locker.LockKeySyncOrders, 10*time.Minute, "当前订单同步任务正在执行中，请勿重复操作")
+	if !ok {
+		return
+	}
+	defer unlock()
+
 	startTime := c.DefaultQuery("startTime", model.LaunchStartDateRocnovel)
 	endTime := c.DefaultQuery("endTime", timeutil.GetTodayCst())
 

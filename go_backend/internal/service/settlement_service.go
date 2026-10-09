@@ -116,14 +116,8 @@ func (s *SettlementService) GetMonthlySettlementList(
 		pCode = strings.ToLower(strings.TrimSpace(platformCode))
 	}
 
-	// 1. 获取全盘或平台有效订单 (按 pay_state = 1)
-	var allOrders []*model.RawOrder
-	var err error
-	if pCode == "ALL" {
-		allOrders, err = s.orderRepo.FindAllValidOrders(ctx)
-	} else {
-		allOrders, err = s.orderRepo.FindValidOrdersByPlatform(ctx, pCode)
-	}
+	// 1. 获取聚合统计明细 (按月度与落地页分组下推到数据库，彻底避免全表原始订单加载到堆内存引发 OOM)
+	summaries, err := s.orderRepo.FindMonthlySettlementSummaries(ctx, pCode)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +152,7 @@ func (s *SettlementService) GetMonthlySettlementList(
 		}
 	}
 
-	// 4. 获取现有月份列表（该平台投放起始月份 至今所有月份，外加订单中出现的月份）
+	// 4. 获取现有月份列表（该平台投放起始月份 至今所有月份，外加订单聚合中出现的月份）
 	platformStartDate := model.GetLaunchStartDateForPlatform(pCode)
 	startYm, _ := time.ParseInLocation("2006-01", platformStartDate[:7], timeutil.BeijingZone)
 	today := time.Now().In(timeutil.BeijingZone)
@@ -171,11 +165,43 @@ func (s *SettlementService) GetMonthlySettlementList(
 		cur = cur.AddDate(0, 1, 0)
 	}
 
-	// 提取订单中出现的北京时间支付月份
-	for _, o := range allOrders {
-		if !o.PayTimeBJ.IsZero() {
-			monthsSet[o.PayTimeBJ.In(timeutil.BeijingZone).Format("2006-01")] = true
+	// 基于数据库聚合结果在内存做 O(Summaries) 单趟归并，彻底杜绝 O(Months * Orders) 双重循环
+	type monthAggData struct {
+		totalRechargeCents int64
+		totalRefundCents   int64
+		totalOrders        int
+		refundOrders       int
+	}
+	monthDataMap := make(map[string]*monthAggData)
+
+	for _, sum := range summaries {
+		if sum == nil || sum.MonthStr == "" {
+			continue
 		}
+		monthsSet[sum.MonthStr] = true
+
+		pid := strings.TrimSpace(sum.LandingPageID)
+		if sType == "PLATFORM_ALL" {
+			// 全部通过
+		} else if sType == "USER_ACCOUNT" {
+			if pid == "" || !userPids[pid] {
+				continue
+			}
+		} else if sType == "UNLINKED_PID" {
+			if pid != "" && allConfiguredPids[pid] {
+				continue
+			}
+		}
+
+		agg := monthDataMap[sum.MonthStr]
+		if agg == nil {
+			agg = &monthAggData{}
+			monthDataMap[sum.MonthStr] = agg
+		}
+		agg.totalRechargeCents += sum.TotalAmountCent
+		agg.totalRefundCents += sum.RefundAmountCent
+		agg.totalOrders += sum.TotalOrders
+		agg.refundOrders += sum.RefundOrders
 	}
 
 	monthsList := make([]string, 0, len(monthsSet))
@@ -198,52 +224,17 @@ func (s *SettlementService) GetMonthlySettlementList(
 
 	for _, monthStr := range monthsList {
 		ym, _ := time.ParseInLocation("2006-01", monthStr, timeutil.BeijingZone)
-		monthStart := time.Date(ym.Year(), ym.Month(), 1, 0, 0, 0, 0, timeutil.BeijingZone)
-		monthEnd := monthStart.AddDate(0, 1, 0).Add(-time.Nanosecond)
 
-		// 过滤当月订单 (严格使用 PayTimeBJ)
 		var totalRechargeCents int64
 		var totalRefundCents int64
 		totalOrders := 0
 		refundOrders := 0
 
-		for _, o := range allOrders {
-			if o.PayTimeBJ.IsZero() {
-				continue
-			}
-			bjPay := o.PayTimeBJ.In(timeutil.BeijingZone)
-			if bjPay.Before(monthStart) || bjPay.After(monthEnd) {
-				continue
-			}
-
-			pid := strings.TrimSpace(o.LandingPageID)
-			if sType == "PLATFORM_ALL" {
-				// 全部通过
-			} else if sType == "USER_ACCOUNT" {
-				if pid == "" || !userPids[pid] {
-					continue
-				}
-			} else if sType == "UNLINKED_PID" {
-				if pid != "" && allConfiguredPids[pid] {
-					continue
-				}
-			}
-
-			// 仅统计支付成功的充值
-			if o.PayState == 1 {
-				cent := int64(o.OrderAmountCent)
-				if cent == 0 && o.OrderAmountUSD.GreaterThan(decimal.Zero) {
-					cent = o.OrderAmountUSD.Mul(decimal.NewFromInt(100)).IntPart()
-				}
-				totalRechargeCents += cent
-				totalOrders++
-
-				// 退款成功 (refund_status == 2)
-				if o.RefundStatus == 2 {
-					totalRefundCents += cent
-					refundOrders++
-				}
-			}
+		if agg, ok := monthDataMap[monthStr]; ok && agg != nil {
+			totalRechargeCents = agg.totalRechargeCents
+			totalRefundCents = agg.totalRefundCents
+			totalOrders = agg.totalOrders
+			refundOrders = agg.refundOrders
 		}
 
 		totalRecharge := decimal.NewFromInt(totalRechargeCents).DivRound(decimal.NewFromInt(100), 2)

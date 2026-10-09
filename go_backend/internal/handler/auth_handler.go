@@ -63,8 +63,9 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	expireDays := config.GlobalConfig.App.Auth.TokenExpireDays
-	token := crypto.GenerateToken(user.ID, user.Username, user.Role, expireDays, config.GlobalConfig.App.Auth.SecretKey)
+	cfg := config.GetGlobalConfig()
+	expireDays := cfg.App.Auth.TokenExpireDays
+	token := crypto.GenerateToken(user.ID, user.Username, user.Role, expireDays, cfg.App.Auth.SecretKey)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":                   0,
@@ -93,7 +94,7 @@ func (h *AuthHandler) Check(c *gin.Context) {
 		token = strings.TrimSpace(authHeader)
 	}
 
-	tokenInfo := crypto.ParseToken(token, config.GlobalConfig.App.Auth.SecretKey)
+	tokenInfo := crypto.ParseToken(token, config.GetGlobalConfig().App.Auth.SecretKey)
 	if !tokenInfo.Valid {
 		c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "Token 已过期或无效"})
 		return

@@ -98,17 +98,22 @@ func GetTodayCst() string {
 	return time.Now().In(BeijingZone).Format(DateLayout)
 }
 
-// GetMaxToday 获取北京时间、美东时间与 UTC 时间中的最大日期 (对应 Java TimeUtils)
+// GetMaxToday 获取北京时间、美东时间与 UTC 时间中日历天最大的日期时间 (对应 Java TimeUtils)
 func GetMaxToday() time.Time {
-	todayBj := time.Now().In(BeijingZone)
-	todayEt := time.Now().In(EasternZone)
-	todayUtc := time.Now().In(UTCZone)
+	now := time.Now()
+	todayBj := now.In(BeijingZone)
+	todayEt := now.In(EasternZone)
+	todayUtc := now.In(UTCZone)
 
 	maxToday := todayBj
-	if todayEt.After(maxToday) {
+	maxDateStr := todayBj.Format(DateLayout)
+
+	if etStr := todayEt.Format(DateLayout); etStr > maxDateStr {
+		maxDateStr = etStr
 		maxToday = todayEt
 	}
-	if todayUtc.After(maxToday) {
+	if utcStr := todayUtc.Format(DateLayout); utcStr > maxDateStr {
+		maxDateStr = utcStr
 		maxToday = todayUtc
 	}
 	return maxToday

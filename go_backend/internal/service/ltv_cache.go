@@ -7,6 +7,31 @@ import (
 	"time"
 )
 
+const (
+	// CachePrefixLtvList LTV 报表列表缓存统一前缀
+	CachePrefixLtvList = "ltv:list:"
+	// CachePrefixDailyDist 每日充值分布 Singleflight 并发单飞统一前缀
+	CachePrefixDailyDist = "daily_dist:"
+)
+
+// BuildLtvListCacheKey 统一构建 LTV 报表缓存 Key: "ltv:list:{platform}:{userID}"
+func BuildLtvListCacheKey(platformCode string, userID int64) string {
+	p := strings.ToLower(strings.TrimSpace(platformCode))
+	if p == "" {
+		p = "all"
+	}
+	return fmt.Sprintf("%s%s:%d", CachePrefixLtvList, p, userID)
+}
+
+// BuildDailyDistKey 统一构建每日充值分布并发单飞 Key: "daily_dist:{platform}:{userID}"
+func BuildDailyDistKey(platformCode string, userID int64) string {
+	p := strings.ToLower(strings.TrimSpace(platformCode))
+	if p == "" {
+		p = "all"
+	}
+	return fmt.Sprintf("%s%s:%d", CachePrefixDailyDist, p, userID)
+}
+
 type cacheEntry struct {
 	data      interface{}
 	timestamp time.Time
@@ -50,7 +75,7 @@ func (c *LtvMemoryCache) Delete(key string) {
 func (c *LtvMemoryCache) InvalidateUser(userID int64) {
 	suffix := fmt.Sprintf(":%d", userID)
 	c.items.Range(func(key, value interface{}) bool {
-		if k, ok := key.(string); ok && strings.HasSuffix(k, suffix) {
+		if k, ok := key.(string); ok && strings.HasPrefix(k, CachePrefixLtvList) && strings.HasSuffix(k, suffix) {
 			c.items.Delete(key)
 		}
 		return true

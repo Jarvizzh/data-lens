@@ -3,9 +3,11 @@ package handler
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
 	"go_backend/internal/middleware"
 	"go_backend/internal/model"
+	"go_backend/internal/pkg/locker"
 	"go_backend/internal/pkg/response"
 	"go_backend/internal/repository"
 	"go_backend/internal/service"
@@ -16,20 +18,29 @@ import (
 type FlicknovelHandler struct {
 	syncMgr      *service.SyncManager
 	platformRepo *repository.PlatformRepository
+	locker       *locker.TaskLocker
 }
 
 func NewFlicknovelHandler(
 	syncMgr *service.SyncManager,
 	platformRepo *repository.PlatformRepository,
+	locker *locker.TaskLocker,
 ) *FlicknovelHandler {
 	return &FlicknovelHandler{
 		syncMgr:      syncMgr,
 		platformRepo: platformRepo,
+		locker:       locker,
 	}
 }
 
 // SyncOrders 手动触发番茄司南订单同步 (/api/flicknovel/sync/orders)
 func (h *FlicknovelHandler) SyncOrders(c *gin.Context) {
+	unlock, ok := h.locker.GuardGin(c, locker.LockKeySyncOrders, 10*time.Minute, "当前订单同步任务正在执行中，请勿重复操作")
+	if !ok {
+		return
+	}
+	defer unlock()
+
 	var body struct {
 		StartDate string `json:"startDate"`
 		EndDate   string `json:"endDate"`
@@ -57,6 +68,12 @@ func (h *FlicknovelHandler) SyncOrders(c *gin.Context) {
 
 // SyncRelations 手动触发番茄司南染色归因同步 (/api/flicknovel/sync/relations)
 func (h *FlicknovelHandler) SyncRelations(c *gin.Context) {
+	unlock, ok := h.locker.GuardGin(c, locker.LockKeySyncOrders, 10*time.Minute, "当前归因同步任务正在执行中，请勿重复操作")
+	if !ok {
+		return
+	}
+	defer unlock()
+
 	var body struct {
 		StartDate string `json:"startDate"`
 		EndDate   string `json:"endDate"`
@@ -84,6 +101,12 @@ func (h *FlicknovelHandler) SyncRelations(c *gin.Context) {
 
 // SyncConfigs 手动触发番茄司南推广链/配置同步 (/api/flicknovel/sync/configs)
 func (h *FlicknovelHandler) SyncConfigs(c *gin.Context) {
+	unlock, ok := h.locker.GuardGin(c, locker.LockKeySyncConfigs, 10*time.Minute, "当前推广配置同步任务正在执行中，请勿重复操作")
+	if !ok {
+		return
+	}
+	defer unlock()
+
 	err := h.syncMgr.SyncFlicknovelPromotionsAndTemplates(c.Request.Context())
 	if err != nil {
 		response.Error(c, 500, "推广链同步失败: "+err.Error())
@@ -98,6 +121,12 @@ func (h *FlicknovelHandler) SyncConfigs(c *gin.Context) {
 
 // SyncPromotionsAndTemplates 手动全量同步推广链接与充值模板 (/api/flicknovel/sync/promotions-and-templates)
 func (h *FlicknovelHandler) SyncPromotionsAndTemplates(c *gin.Context) {
+	unlock, ok := h.locker.GuardGin(c, locker.LockKeySyncConfigs, 10*time.Minute, "当前推广配置同步任务正在执行中，请勿重复操作")
+	if !ok {
+		return
+	}
+	defer unlock()
+
 	err := h.syncMgr.SyncFlicknovelPromotionsAndTemplates(c.Request.Context())
 	if err != nil {
 		response.Error(c, 500, "同步推广与模板失败: "+err.Error())

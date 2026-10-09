@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"go_backend/internal/config"
@@ -17,6 +18,7 @@ import (
 type Client struct {
 	httpClient *httpclient.Client
 	cfg        *config.RocnovelAPI
+	mu         sync.RWMutex
 }
 
 func NewClient(cfg *config.RocnovelAPI) *Client {
@@ -24,6 +26,31 @@ func NewClient(cfg *config.RocnovelAPI) *Client {
 		httpClient: httpclient.NewClient(),
 		cfg:        cfg,
 	}
+}
+
+// UpdateCredentials 线程安全动态更新认证 Token 与 Cookie
+func (c *Client) UpdateCredentials(auth, cookie string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cfg == nil {
+		c.cfg = &config.RocnovelAPI{}
+	}
+	if strings.TrimSpace(auth) != "" {
+		c.cfg.Authorization = strings.TrimSpace(auth)
+	}
+	if strings.TrimSpace(cookie) != "" {
+		c.cfg.Cookie = strings.TrimSpace(cookie)
+	}
+}
+
+// GetCredentials 线程安全获取当前认证 Token 与 Cookie
+func (c *Client) GetCredentials() (auth, cookie string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.cfg == nil {
+		return "", ""
+	}
+	return c.cfg.Authorization, c.cfg.Cookie
 }
 
 type OrderReportRequest struct {
@@ -142,9 +169,10 @@ func (c *Client) FetchOrdersPage(ctx context.Context, pageIndex, pageSize int, s
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "*/*")
 
+	defaultAuth, defaultCookie := c.GetCredentials()
 	activeAuth := strings.TrimSpace(auth)
 	if activeAuth == "" {
-		activeAuth = c.cfg.Authorization
+		activeAuth = defaultAuth
 	}
 	if activeAuth != "" {
 		req.Header.Set("Authorization", activeAuth)
@@ -152,7 +180,7 @@ func (c *Client) FetchOrdersPage(ctx context.Context, pageIndex, pageSize int, s
 
 	activeCookie := strings.TrimSpace(cookie)
 	if activeCookie == "" {
-		activeCookie = c.cfg.Cookie
+		activeCookie = defaultCookie
 	}
 	if activeCookie != "" {
 		req.Header.Set("Cookie", activeCookie)
@@ -212,16 +240,17 @@ func (c *Client) FetchLandingPagesPage(ctx context.Context, pageIndex, pageSize 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
+	defaultAuth, defaultCookie := c.GetCredentials()
 	activeAuth := strings.TrimSpace(auth)
 	if activeAuth == "" {
-		activeAuth = c.cfg.Authorization
+		activeAuth = defaultAuth
 	}
 	if activeAuth != "" {
 		req.Header.Set("Authorization", activeAuth)
 	}
 	activeCookie := strings.TrimSpace(cookie)
 	if activeCookie == "" {
-		activeCookie = c.cfg.Cookie
+		activeCookie = defaultCookie
 	}
 	if activeCookie != "" {
 		req.Header.Set("Cookie", activeCookie)
@@ -264,16 +293,17 @@ func (c *Client) FetchSubscribeProductsForConfig(ctx context.Context, configID, 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
+	defaultAuth2, defaultCookie2 := c.GetCredentials()
 	activeAuth := strings.TrimSpace(auth)
 	if activeAuth == "" {
-		activeAuth = c.cfg.Authorization
+		activeAuth = defaultAuth2
 	}
 	if activeAuth != "" {
 		req.Header.Set("Authorization", activeAuth)
 	}
 	activeCookie := strings.TrimSpace(cookie)
 	if activeCookie == "" {
-		activeCookie = c.cfg.Cookie
+		activeCookie = defaultCookie2
 	}
 	if activeCookie != "" {
 		req.Header.Set("Cookie", activeCookie)

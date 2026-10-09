@@ -86,8 +86,8 @@ func TestGlobalPools_InitAndGet(t *testing.T) {
 	}
 
 	thirdParty := GetThirdPartyPool()
-	if thirdParty == nil || thirdParty.Cap() != 8 {
-		t.Fatalf("expected third party pool with capacity 8, got %v", thirdParty)
+	if thirdParty == nil || thirdParty.Cap() != 15 {
+		t.Fatalf("expected third party pool with capacity 15, got %v", thirdParty)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)

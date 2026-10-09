@@ -171,10 +171,19 @@ func (s *UserService) DeleteUser(ctx context.Context, userID int64) error {
 	return s.userRepo.Delete(ctx, userID)
 }
 
+const maxSubAccountRecursionDepth = 5
+
 func (s *UserService) GetLandingPageConfigs(ctx context.Context, platformCode string, userID int64) ([]dto.LandingPageConfigItem, []string, error) {
-	if userID <= 0 {
+	visited := make(map[int64]bool)
+	return s.getLandingPageConfigsInternal(ctx, platformCode, userID, visited, 0)
+}
+
+func (s *UserService) getLandingPageConfigsInternal(ctx context.Context, platformCode string, userID int64, visited map[int64]bool, depth int) ([]dto.LandingPageConfigItem, []string, error) {
+	if userID <= 0 || visited[userID] || depth > maxSubAccountRecursionDepth {
 		return nil, nil, nil
 	}
+	visited[userID] = true
+
 	user, err := s.userRepo.FindByID(ctx, userID)
 	if err != nil || user == nil {
 		return nil, nil, err
@@ -185,7 +194,7 @@ func (s *UserService) GetLandingPageConfigs(ctx context.Context, platformCode st
 		pCode = "all"
 	}
 
-	// 1. 若为主账号，自动聚合所有子账号配置的落地页（去重）
+	// 1. 若为主账号，自动聚合所有子账号配置的落地页（去重，防环防爆栈）
 	if user.IsMaster == 1 {
 		subUserIDs, err := s.userRepo.FindSubAccountIDs(ctx, userID)
 		if err != nil {
@@ -195,7 +204,10 @@ func (s *UserService) GetLandingPageConfigs(ctx context.Context, platformCode st
 		var aggregated []dto.LandingPageConfigItem
 		var aggregatedIDs []string
 		for _, subID := range subUserIDs {
-			subConfigs, _, err := s.GetLandingPageConfigs(ctx, platformCode, subID)
+			if visited[subID] {
+				continue
+			}
+			subConfigs, _, err := s.getLandingPageConfigsInternal(ctx, platformCode, subID, visited, depth+1)
 			if err != nil {
 				continue
 			}

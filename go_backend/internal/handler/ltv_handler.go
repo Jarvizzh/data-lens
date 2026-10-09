@@ -10,6 +10,7 @@ import (
 
 	"go_backend/internal/middleware"
 	"go_backend/internal/model"
+	"go_backend/internal/pkg/locker"
 	"go_backend/internal/pkg/response"
 	"go_backend/internal/service"
 	"go_backend/internal/service/dto"
@@ -23,6 +24,7 @@ type LtvHandler struct {
 	permSvc    *service.UserPermissionService
 	syncMgr    *service.SyncManager
 	predictSvc *service.PredictService
+	locker     *locker.TaskLocker
 }
 
 func NewLtvHandler(
@@ -31,6 +33,7 @@ func NewLtvHandler(
 	permSvc *service.UserPermissionService,
 	syncMgr *service.SyncManager,
 	predictSvc *service.PredictService,
+	locker *locker.TaskLocker,
 ) *LtvHandler {
 	return &LtvHandler{
 		ltvSvc:     ltvSvc,
@@ -38,6 +41,7 @@ func NewLtvHandler(
 		permSvc:    permSvc,
 		syncMgr:    syncMgr,
 		predictSvc: predictSvc,
+		locker:     locker,
 	}
 }
 
@@ -182,6 +186,13 @@ func (h *LtvHandler) BatchSpend(c *gin.Context) {
 
 // Recalculate 重新计算 LTV 报表与每日充值分布 (/api/ltv/recalculate)
 func (h *LtvHandler) Recalculate(c *gin.Context) {
+	unlock, ok := h.locker.GuardGinMulti(c, 10*time.Minute, "当前数据重算或同步任务正在执行中，请勿重复操作",
+		locker.LockKeyCalcLtv, locker.LockKeyCalcDist)
+	if !ok {
+		return
+	}
+	defer unlock()
+
 	platformCode := c.DefaultQuery("platformCode", "ALL")
 	targetUID := h.resolveTargetUserID(c)
 
@@ -204,6 +215,12 @@ func (h *LtvHandler) Recalculate(c *gin.Context) {
 
 // RecalculateLtv 仅重算 LTV 报表 (/api/ltv/recalculate-ltv)
 func (h *LtvHandler) RecalculateLtv(c *gin.Context) {
+	unlock, ok := h.locker.GuardGin(c, locker.LockKeyCalcLtv, 10*time.Minute, "当前 LTV 重算任务正在执行中，请勿重复操作")
+	if !ok {
+		return
+	}
+	defer unlock()
+
 	platformCode := c.DefaultQuery("platformCode", "ALL")
 	targetUID := h.resolveTargetUserID(c)
 
@@ -223,6 +240,12 @@ func (h *LtvHandler) RecalculateLtv(c *gin.Context) {
 
 // SyncOrders 同步订单 (/api/ltv/sync-orders)
 func (h *LtvHandler) SyncOrders(c *gin.Context) {
+	unlock, ok := h.locker.GuardGin(c, locker.LockKeySyncOrders, 10*time.Minute, "当前订单同步任务正在执行中，请勿重复操作")
+	if !ok {
+		return
+	}
+	defer unlock()
+
 	var req struct {
 		StartTime    string `json:"startTime"`
 		EndTime      string `json:"endTime"`
@@ -267,6 +290,13 @@ func (h *LtvHandler) SyncOrders(c *gin.Context) {
 
 // SyncAndCalc 同步订单并重新计算 (/api/ltv/sync-and-calc)
 func (h *LtvHandler) SyncAndCalc(c *gin.Context) {
+	unlock, ok := h.locker.GuardGinMulti(c, 15*time.Minute, "当前数据同步与重算任务正在执行中，请勿重复操作",
+		locker.LockKeySyncOrders, locker.LockKeyCalcLtv, locker.LockKeyCalcDist)
+	if !ok {
+		return
+	}
+	defer unlock()
+
 	var req struct {
 		StartTime    string `json:"startTime"`
 		EndTime      string `json:"endTime"`
@@ -310,6 +340,12 @@ func (h *LtvHandler) SyncAndCalc(c *gin.Context) {
 
 // RecalculateDailyDistribution 仅重算每日充值分布 (/api/ltv/recalculate-daily-distribution)
 func (h *LtvHandler) RecalculateDailyDistribution(c *gin.Context) {
+	unlock, ok := h.locker.GuardGin(c, locker.LockKeyCalcDist, 10*time.Minute, "当前每日充值分布重算任务正在执行中，请勿重复操作")
+	if !ok {
+		return
+	}
+	defer unlock()
+
 	platformCode := c.DefaultQuery("platformCode", "ALL")
 	targetUID := h.resolveTargetUserID(c)
 
@@ -347,6 +383,12 @@ func (h *LtvHandler) GetBenchmark(c *gin.Context) {
 
 // RecalculateBenchmark 手动重算预测基准库 (/api/ltv/recalculate-benchmark)
 func (h *LtvHandler) RecalculateBenchmark(c *gin.Context) {
+	unlock, ok := h.locker.GuardGin(c, locker.LockKeyCalcBenchmark, 10*time.Minute, "当前预测基准库重算任务正在执行中，请勿重复操作")
+	if !ok {
+		return
+	}
+	defer unlock()
+
 	if err := h.predictSvc.RecalculateAllBenchmarks(c.Request.Context()); err != nil {
 		response.Error(c, 500, "重算基准库失败: "+err.Error())
 		return
@@ -356,6 +398,12 @@ func (h *LtvHandler) RecalculateBenchmark(c *gin.Context) {
 
 // SyncSubscribeConfigs 手动触发拉取订阅配置版本库 (/api/ltv/sync-subscribe-configs)
 func (h *LtvHandler) SyncSubscribeConfigs(c *gin.Context) {
+	unlock, ok := h.locker.GuardGin(c, locker.LockKeySyncConfigs, 10*time.Minute, "当前订阅配置同步任务正在执行中，请勿重复操作")
+	if !ok {
+		return
+	}
+	defer unlock()
+
 	platformCode := c.DefaultQuery("platformCode", model.PlatformRocnovel)
 	count := 0
 	if h.syncMgr != nil {

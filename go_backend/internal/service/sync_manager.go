@@ -43,6 +43,19 @@ type SyncManager struct {
 	templateDetailCache    map[string]*TemplatePriceDetail
 	templatePriceTypeCache map[string]map[int]int
 	lastFnSyncTime         time.Time
+
+	// 订阅配置版本内存缓存 (防止批量订单同步时频繁触发 N+1 级联数据库查询风暴)
+	subVersionsMu       sync.RWMutex
+	subVersionsCache    []*model.SubscriptionConfigVersion
+	subVersionsCachedAt time.Time
+}
+
+// InvalidateSubscriptionConfigCache 主动失效订阅版本内存缓存
+func (m *SyncManager) InvalidateSubscriptionConfigCache() {
+	m.subVersionsMu.Lock()
+	m.subVersionsCache = nil
+	m.subVersionsCachedAt = time.Time{}
+	m.subVersionsMu.Unlock()
 }
 
 func NewSyncManager(

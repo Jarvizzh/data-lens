@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"go_backend/internal/config"
@@ -21,6 +22,7 @@ import (
 type Client struct {
 	httpClient *httpclient.Client
 	cfg        *config.FlicknovelAPI
+	mu         sync.RWMutex
 }
 
 func NewClient(cfg *config.FlicknovelAPI) *Client {
@@ -31,6 +33,8 @@ func NewClient(cfg *config.FlicknovelAPI) *Client {
 }
 
 func (c *Client) GetConfig() (baseURL, companyID, privateKey, defaultEmail string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if c.cfg == nil {
 		return "", "", "", ""
 	}
@@ -38,6 +42,8 @@ func (c *Client) GetConfig() (baseURL, companyID, privateKey, defaultEmail strin
 }
 
 func (c *Client) UpdateCredentials(companyID, privateKey, defaultEmail string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.cfg == nil {
 		c.cfg = &config.FlicknovelAPI{}
 	}
@@ -67,20 +73,26 @@ func (c *Client) post(ctx context.Context, apiPath string, bodyObj interface{}, 
 	_, _ = rand.Read(nonceBytes)
 	nonce := hex.EncodeToString(nonceBytes)
 
+	c.mu.RLock()
+	companyID := c.cfg.CompanyID
+	privateKey := c.cfg.PrivateKey
+	baseURL := c.cfg.BaseURL
+	c.mu.RUnlock()
+
 	queryParams := map[string]string{
-		"company_id": c.cfg.CompanyID,
+		"company_id": companyID,
 		"timestamp":  timestampStr,
 		"nonce":      nonce,
 	}
 
-	sign, err := crypto.GenerateFlicknovelSign(queryParams, bodyJSON, c.cfg.PrivateKey)
+	sign, err := crypto.GenerateFlicknovelSign(queryParams, bodyJSON, privateKey)
 	if err != nil {
 		return fmt.Errorf("generate ed25519 sign failed: %w", err)
 	}
 	queryParams["sign"] = sign
 
 	// 构建 URL
-	reqURL := fmt.Sprintf("%s%s", c.cfg.BaseURL, apiPath)
+	reqURL := fmt.Sprintf("%s%s", baseURL, apiPath)
 	u, err := url.Parse(reqURL)
 	if err != nil {
 		return fmt.Errorf("parse url failed: %w", err)

@@ -147,19 +147,56 @@ func (c *LtvCalculator) CalculateSingleCohort(
 	}
 	stat.SubPeriodDays = detectedPeriod
 
-	// 2. 7日与15日留存
+	// 2. 7日与15日留存 & Day 1 ~ Day 60 充值单趟扫描 (O(N + 60) 前缀和优化，消除 O(60*N) 重复热循环)
 	day8DateStr := launchDate.AddDate(0, 0, 7).Format(timeutil.DateLayout)
+	day16DateStr := launchDate.AddDate(0, 0, 15).Format(timeutil.DateLayout)
 	maxTodayStr := maxToday.Format(timeutil.DateLayout)
-	if day8DateStr <= maxTodayStr {
-		retained7 := make(map[string]struct{})
-		for _, o := range cohortOrders {
-			if _, ok := subMembersMap[o.MemberID]; ok {
-				payDateStr := GetEffectivePayDate(o, tzMap)
-				if payDateStr != "" && payDateStr >= day8DateStr {
-					retained7[o.MemberID] = struct{}{}
-				}
+	launchDateStr = launchDate.Format(timeutil.DateLayout)
+
+	checkDay7 := day8DateStr <= maxTodayStr
+	checkDay15 := day16DateStr <= maxTodayStr
+
+	retained7 := make(map[string]struct{})
+	retained15 := make(map[string]struct{})
+
+	// 预先建立日期字符串到天数偏移 (Day 1 ~ Day 60) 的快速映射表
+	dateToDayIndex := make(map[string]int, 60)
+	for d := 1; d <= 60; d++ {
+		dateToDayIndex[launchDate.AddDate(0, 0, d-1).Format(timeutil.DateLayout)] = d
+	}
+
+	// 增量充值金额分桶 (1-indexed: 1..60)
+	var dailyDelta [61]decimal.Decimal
+
+	// 单趟遍历所有 cohort 订单：同时完成留存统计与 Day 1~60 增量金额分桶
+	for _, o := range cohortOrders {
+		payDateStr := GetEffectivePayDate(o, tzMap)
+		if payDateStr == "" {
+			continue
+		}
+
+		// 留存统计 (仅统计首充用户中的订阅成员)
+		if _, isSubMember := subMembersMap[o.MemberID]; isSubMember {
+			if checkDay7 && payDateStr >= day8DateStr {
+				retained7[o.MemberID] = struct{}{}
+			}
+			if checkDay15 && payDateStr >= day16DateStr {
+				retained15[o.MemberID] = struct{}{}
 			}
 		}
+
+		// Day 1 ~ Day 60 充值分桶：
+		// 若支付日期早于或等于投放日期，归入 Day 1
+		if payDateStr <= launchDateStr {
+			dailyDelta[1] = dailyDelta[1].Add(o.OrderAmountUSD)
+		} else if dayIdx, ok := dateToDayIndex[payDateStr]; ok {
+			dailyDelta[dayIdx] = dailyDelta[dayIdx].Add(o.OrderAmountUSD)
+		}
+		// 若大于 Day 60 则不计入 Day 1~60
+	}
+
+	// 留存统计赋值
+	if checkDay7 {
 		c7 := len(retained7)
 		stat.Day7SubUserCount = &c7
 		if subUserCount > 0 {
@@ -171,17 +208,7 @@ func (c *LtvCalculator) CalculateSingleCohort(
 		stat.Day7SubUserRetention = nil
 	}
 
-	day16DateStr := launchDate.AddDate(0, 0, 15).Format(timeutil.DateLayout)
-	if day16DateStr <= maxTodayStr {
-		retained15 := make(map[string]struct{})
-		for _, o := range cohortOrders {
-			if _, ok := subMembersMap[o.MemberID]; ok {
-				payDateStr := GetEffectivePayDate(o, tzMap)
-				if payDateStr != "" && payDateStr >= day16DateStr {
-					retained15[o.MemberID] = struct{}{}
-				}
-			}
-		}
+	if checkDay15 {
 		c15 := len(retained15)
 		stat.Day15SubUserCount = &c15
 		if subUserCount > 0 {
@@ -193,7 +220,8 @@ func (c *LtvCalculator) CalculateSingleCohort(
 		stat.Day15SubUserRetention = nil
 	}
 
-	// 3. Day 1 ~ Day 60 充值与 ROI 计算 (未到达天数置为 nil，序列化输出为 null)
+	// 3. 线性前缀和扫描：O(60) 快速计算 Day 1 ~ Day 60 累计充值与 ROI
+	cumRecharge := decimal.Zero
 	for day := 1; day <= 60; day++ {
 		targetDateStr := launchDate.AddDate(0, 0, day-1).Format(timeutil.DateLayout)
 		if targetDateStr > maxTodayStr {
@@ -202,17 +230,11 @@ func (c *LtvCalculator) CalculateSingleCohort(
 			continue
 		}
 
-		dayCumRecharge := decimal.Zero
-		for _, o := range cohortOrders {
-			payDateStr := GetEffectivePayDate(o, tzMap)
-			if payDateStr != "" && payDateStr <= targetDateStr {
-				dayCumRecharge = dayCumRecharge.Add(o.OrderAmountUSD)
-			}
-		}
-
-		stat.SetRechargeForDay(day, &dayCumRecharge)
+		cumRecharge = cumRecharge.Add(dailyDelta[day])
+		dayCum := cumRecharge
+		stat.SetRechargeForDay(day, &dayCum)
 		if spend.GreaterThan(decimal.Zero) {
-			roi := dayCumRecharge.DivRound(spend, 4)
+			roi := dayCum.DivRound(spend, 4)
 			stat.SetRoiForDay(day, &roi)
 		} else {
 			stat.SetRoiForDay(day, nil)
