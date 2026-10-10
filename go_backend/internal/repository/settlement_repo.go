@@ -15,41 +15,7 @@ type SettlementRepository struct {
 }
 
 func NewSettlementRepository(db *gorm.DB) *SettlementRepository {
-	repo := &SettlementRepository{db: db}
-	repo.ensureSchemaMigrated()
-	return repo
-}
-
-// ensureSchemaMigrated 确保 monthly_settlement_config 具备 platform_code 维度及相应唯一索引
-func (r *SettlementRepository) ensureSchemaMigrated() {
-	if r.db == nil {
-		return
-	}
-	sqlDB, err := r.db.DB()
-	if err != nil {
-		return
-	}
-
-	// 1. 检查是否存在 platform_code 列
-	var colCount int
-	err = sqlDB.QueryRow("SELECT COUNT(1) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'monthly_settlement_config' AND column_name = 'platform_code'").Scan(&colCount)
-	if err == nil && colCount == 0 {
-		_, _ = sqlDB.Exec("ALTER TABLE monthly_settlement_config ADD COLUMN platform_code VARCHAR(32) NOT NULL DEFAULT 'rocnovel' AFTER id")
-	}
-
-	// 2. 检查旧索引 uk_settle_type_user_month 并删除
-	var oldIdxCount int
-	err = sqlDB.QueryRow("SELECT COUNT(1) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'monthly_settlement_config' AND index_name = 'uk_settle_type_user_month'").Scan(&oldIdxCount)
-	if err == nil && oldIdxCount > 0 {
-		_, _ = sqlDB.Exec("ALTER TABLE monthly_settlement_config DROP INDEX uk_settle_type_user_month")
-	}
-
-	// 3. 检查新唯一索引 uk_settle_plat_type_user_month 并创建
-	var newIdxCount int
-	err = sqlDB.QueryRow("SELECT COUNT(1) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'monthly_settlement_config' AND index_name = 'uk_settle_plat_type_user_month'").Scan(&newIdxCount)
-	if err == nil && newIdxCount == 0 {
-		_, _ = sqlDB.Exec("ALTER TABLE monthly_settlement_config ADD UNIQUE INDEX uk_settle_plat_type_user_month (platform_code, settlement_type, target_user_id, month_str)")
-	}
+	return &SettlementRepository{db: db}
 }
 
 func (r *SettlementRepository) FindConfigs(ctx context.Context, platformCode, settlementType string, targetUserID *int64, monthStr string) ([]*model.MonthlySettlementConfig, error) {
