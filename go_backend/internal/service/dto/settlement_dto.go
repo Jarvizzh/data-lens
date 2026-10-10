@@ -7,6 +7,7 @@ import (
 )
 
 type MonthlySettlementItemDto struct {
+	PlatformCode             string          `json:"platformCode"`
 	MonthStr                 string          `json:"monthStr"`
 	SettlementType           string          `json:"settlementType"`
 	TargetUserID             *int64          `json:"targetUserId"`
@@ -29,6 +30,7 @@ type MonthlySettlementItemDto struct {
 }
 
 type MonthlySettlementSaveRequestDto struct {
+	PlatformCode             string          `json:"platformCode"`
 	SettlementType           string          `json:"settlementType"`
 	TargetUserID             *int64          `json:"targetUserId"`
 	MonthStr                 string          `json:"monthStr"`

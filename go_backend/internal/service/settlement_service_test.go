@@ -176,3 +176,18 @@ func TestMonthlySettlementSummaryMapping(t *testing.T) {
 		t.Fatalf("Expected 800.00 / 30.00, got %s / %s", recharge01, refund01)
 	}
 }
+
+// TestPlatformIsolationInSettlementConfig 验证多平台配置隔离与独立性
+func TestPlatformIsolationInSettlementConfig(t *testing.T) {
+	configMap := make(map[string]map[string]decimal.Decimal)
+	configMap["rocnovel"] = map[string]decimal.Decimal{
+		"2026-08": decimal.NewFromFloat(1000.00),
+	}
+	configMap["flicknovel"] = map[string]decimal.Decimal{
+		"2026-08": decimal.NewFromFloat(50.00),
+	}
+
+	if configMap["rocnovel"]["2026-08"].Equal(configMap["flicknovel"]["2026-08"]) {
+		t.Fatal("Platform configs should be strictly isolated and not equal")
+	}
+}

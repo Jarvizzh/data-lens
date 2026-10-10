@@ -49,10 +49,16 @@ func (s *SettlementService) SaveSettlementConfig(ctx context.Context, req dto.Mo
 		targetUserID = req.TargetUserID
 	}
 
+	pCode := "ALL"
+	if req.PlatformCode != "" && !strings.EqualFold(req.PlatformCode, "ALL") {
+		pCode = strings.ToLower(strings.TrimSpace(req.PlatformCode))
+	}
+
 	// 查出已有记录，若存在则更新字段，不存在则新建
-	cfg, err := s.settleRepo.FindOneConfig(ctx, sType, targetUserID, monthStr)
+	cfg, err := s.settleRepo.FindOneConfig(ctx, pCode, sType, targetUserID, monthStr)
 	if err != nil || cfg == nil {
 		cfg = &model.MonthlySettlementConfig{
+			PlatformCode:             pCode,
 			SettlementType:           sType,
 			TargetUserID:             targetUserID,
 			MonthStr:                 monthStr,
@@ -63,6 +69,7 @@ func (s *SettlementService) SaveSettlementConfig(ctx context.Context, req dto.Mo
 			ChannelFeeRate:           decimal.NewFromFloat(0.07),
 		}
 	}
+	cfg.PlatformCode = pCode
 
 	if req.SettledRefundAmount.GreaterThanOrEqual(decimal.Zero) {
 		cfg.SettledRefundAmount = req.SettledRefundAmount
@@ -211,8 +218,8 @@ func (s *SettlementService) GetMonthlySettlementList(
 	// 月份从新到旧倒序排序
 	sort.Sort(sort.Reverse(sort.StringSlice(monthsList)))
 
-	// 查询所有历史配置
-	allConfigs, _ := s.settleRepo.FindConfigs(ctx, sType, targetUserID, "")
+	// 查询当前平台专有历史配置
+	allConfigs, _ := s.settleRepo.FindConfigs(ctx, pCode, sType, targetUserID, "")
 	configMap := make(map[string]*model.MonthlySettlementConfig)
 	for _, c := range allConfigs {
 		configMap[c.MonthStr] = c
@@ -323,6 +330,7 @@ func (s *SettlementService) GetMonthlySettlementList(
 		}
 
 		item := &dto.MonthlySettlementItemDto{
+			PlatformCode:             pCode,
 			MonthStr:                 monthStr,
 			SettlementType:           sType,
 			TargetUserID:             targetUserID,

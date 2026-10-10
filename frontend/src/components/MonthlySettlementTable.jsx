@@ -157,6 +157,7 @@ export default function MonthlySettlementTable({ token, currentUser, showToast, 
     try {
       const selfId = currentUser?.userId || currentUser?.id;
       const payload = {
+        platformCode: selectedPlatform || 'ALL',
         settlementType: isAdmin ? settlementType : 'USER_ACCOUNT',
         targetUserId: isAdmin ? (settlementType === 'USER_ACCOUNT' ? selectedUserId : null) : selfId,
         monthStr: row.monthStr,
@@ -206,6 +207,7 @@ export default function MonthlySettlementTable({ token, currentUser, showToast, 
         if (!row) continue;
 
         const payload = {
+          platformCode: selectedPlatform || 'ALL',
           settlementType: isAdmin ? settlementType : 'USER_ACCOUNT',
           targetUserId: isAdmin ? (settlementType === 'USER_ACCOUNT' ? selectedUserId : null) : selfId,
           monthStr: row.monthStr,

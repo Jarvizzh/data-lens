@@ -9,6 +9,7 @@ import (
 // MonthlySettlementConfig 月份结算参数配置表
 type MonthlySettlementConfig struct {
 	ID                       int64           `gorm:"primaryKey;autoIncrement;column:id" json:"id"`
+	PlatformCode             string          `gorm:"column:platform_code;size:32;not null;default:'rocnovel'" json:"platformCode"`
 	SettlementType           string          `gorm:"column:settlement_type;size:32;not null" json:"settlementType"`
 	TargetUserID             *int64          `gorm:"column:target_user_id" json:"targetUserId"`
 	MonthStr                 string          `gorm:"column:month_str;size:16;not null" json:"monthStr"`

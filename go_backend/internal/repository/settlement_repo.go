@@ -15,13 +15,54 @@ type SettlementRepository struct {
 }
 
 func NewSettlementRepository(db *gorm.DB) *SettlementRepository {
-	return &SettlementRepository{db: db}
+	repo := &SettlementRepository{db: db}
+	repo.ensureSchemaMigrated()
+	return repo
 }
 
-func (r *SettlementRepository) FindConfigs(ctx context.Context, settlementType string, targetUserID *int64, monthStr string) ([]*model.MonthlySettlementConfig, error) {
+// ensureSchemaMigrated 确保 monthly_settlement_config 具备 platform_code 维度及相应唯一索引
+func (r *SettlementRepository) ensureSchemaMigrated() {
+	if r.db == nil {
+		return
+	}
+	sqlDB, err := r.db.DB()
+	if err != nil {
+		return
+	}
+
+	// 1. 检查是否存在 platform_code 列
+	var colCount int
+	err = sqlDB.QueryRow("SELECT COUNT(1) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'monthly_settlement_config' AND column_name = 'platform_code'").Scan(&colCount)
+	if err == nil && colCount == 0 {
+		_, _ = sqlDB.Exec("ALTER TABLE monthly_settlement_config ADD COLUMN platform_code VARCHAR(32) NOT NULL DEFAULT 'rocnovel' AFTER id")
+	}
+
+	// 2. 检查旧索引 uk_settle_type_user_month 并删除
+	var oldIdxCount int
+	err = sqlDB.QueryRow("SELECT COUNT(1) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'monthly_settlement_config' AND index_name = 'uk_settle_type_user_month'").Scan(&oldIdxCount)
+	if err == nil && oldIdxCount > 0 {
+		_, _ = sqlDB.Exec("ALTER TABLE monthly_settlement_config DROP INDEX uk_settle_type_user_month")
+	}
+
+	// 3. 检查新唯一索引 uk_settle_plat_type_user_month 并创建
+	var newIdxCount int
+	err = sqlDB.QueryRow("SELECT COUNT(1) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'monthly_settlement_config' AND index_name = 'uk_settle_plat_type_user_month'").Scan(&newIdxCount)
+	if err == nil && newIdxCount == 0 {
+		_, _ = sqlDB.Exec("ALTER TABLE monthly_settlement_config ADD UNIQUE INDEX uk_settle_plat_type_user_month (platform_code, settlement_type, target_user_id, month_str)")
+	}
+}
+
+func (r *SettlementRepository) FindConfigs(ctx context.Context, platformCode, settlementType string, targetUserID *int64, monthStr string) ([]*model.MonthlySettlementConfig, error) {
 	var list []*model.MonthlySettlementConfig
 	q := r.db.WithContext(ctx)
 
+	if platformCode != "" {
+		pCode := strings.ToLower(strings.TrimSpace(platformCode))
+		if pCode == "" || pCode == "all" {
+			pCode = "ALL"
+		}
+		q = q.Where("platform_code = ?", pCode)
+	}
 	if settlementType != "" {
 		q = q.Where("settlement_type = ?", settlementType)
 	}
@@ -38,9 +79,14 @@ func (r *SettlementRepository) FindConfigs(ctx context.Context, settlementType s
 	return list, err
 }
 
-func (r *SettlementRepository) FindOneConfig(ctx context.Context, settlementType string, targetUserID *int64, monthStr string) (*model.MonthlySettlementConfig, error) {
+func (r *SettlementRepository) FindOneConfig(ctx context.Context, platformCode, settlementType string, targetUserID *int64, monthStr string) (*model.MonthlySettlementConfig, error) {
 	var cfg model.MonthlySettlementConfig
-	q := r.db.WithContext(ctx).Where("settlement_type = ? AND month_str = ?", settlementType, monthStr)
+	pCode := strings.ToLower(strings.TrimSpace(platformCode))
+	if pCode == "" || pCode == "all" {
+		pCode = "ALL"
+	}
+
+	q := r.db.WithContext(ctx).Where("platform_code = ? AND settlement_type = ? AND month_str = ?", pCode, settlementType, monthStr)
 	if targetUserID != nil && *targetUserID > 0 {
 		q = q.Where("target_user_id = ?", *targetUserID)
 	} else {
@@ -54,8 +100,12 @@ func (r *SettlementRepository) FindOneConfig(ctx context.Context, settlementType
 }
 
 func (r *SettlementRepository) SaveConfig(ctx context.Context, cfg *model.MonthlySettlementConfig) error {
+	if cfg.PlatformCode == "" {
+		cfg.PlatformCode = "ALL"
+	}
 	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{
+			{Name: "platform_code"},
 			{Name: "settlement_type"},
 			{Name: "target_user_id"},
 			{Name: "month_str"},

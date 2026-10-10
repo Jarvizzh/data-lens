@@ -114,6 +114,13 @@ func (h *SettlementHandler) SaveConfig(c *gin.Context) {
 		return
 	}
 
+	if strings.TrimSpace(req.PlatformCode) == "" {
+		req.PlatformCode = c.Query("platformCode")
+	}
+	if strings.TrimSpace(req.PlatformCode) == "" {
+		req.PlatformCode = "ALL"
+	}
+
 	isAdmin := u.IsAdmin()
 	if !isAdmin {
 		req.SettlementType = "USER_ACCOUNT"
