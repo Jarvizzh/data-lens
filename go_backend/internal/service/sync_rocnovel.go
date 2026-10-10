@@ -23,13 +23,23 @@ func (m *SyncManager) fetchRocnovelOrdersForDay(ctx context.Context, dayStr, aut
 	dayStart := dayStr + " 00:00:00"
 	dayEnd := dayStr + " 23:59:59"
 	pageIndex := 1
-	pageSize := 100
+	pageSize := 500
 	var allOrders []*model.RawOrder
 
 	for {
 		data, err := m.rocnovelClient.FetchOrdersPage(ctx, pageIndex, pageSize, dayStart, dayEnd, "", auth, cookie)
 		if err != nil {
 			return allOrders, err
+		}
+
+		if pageIndex == 1 && data != nil {
+			m.logger.Info("Fetched Rocnovel orders page 1",
+				zap.String("day", dayStr),
+				zap.Int("requested_page_size", pageSize),
+				zap.Int("returned_records", len(data.Records)),
+				zap.Int64("total", data.Total),
+				zap.Int("pages", data.Pages),
+			)
 		}
 
 		if len(data.Records) == 0 {
