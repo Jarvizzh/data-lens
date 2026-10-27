@@ -438,12 +438,12 @@ func (s *RechargeStatService) CalculateDistributionSummaryFromOrders(platformCod
 			ym := payDate[:7]
 			if ym == thisMonthStr {
 				thisMonthRecharge = thisMonthRecharge.Add(o.OrderAmountUSD)
-				if o.RefundStatus == 2 {
+				if o.IsRefunded() {
 					thisMonthRefund = thisMonthRefund.Add(o.OrderAmountUSD)
 				}
 			} else if ym == lastMonthStr {
 				lastMonthRecharge = lastMonthRecharge.Add(o.OrderAmountUSD)
-				if o.RefundStatus == 2 {
+				if o.IsRefunded() {
 					lastMonthRefund = lastMonthRefund.Add(o.OrderAmountUSD)
 				}
 			}

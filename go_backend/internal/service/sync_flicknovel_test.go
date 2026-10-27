@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"go_backend/internal/model"
 	"go_backend/internal/pkg/timeutil"
+	"go_backend/internal/service/client/flicknovel"
 )
 
 func TestSplitFlicknovelSegments_ShortRange(t *testing.T) {
@@ -85,5 +87,53 @@ func TestSyncFlicknovelRelations_ClientNotConfigured(t *testing.T) {
 	}
 	if err.Error() != "flicknovel client not configured" {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestFlicknovelOrderItem_EnumsAndPeriod(t *testing.T) {
+	resolver := NewFlicknovelOrderTypeResolver(nil)
+
+	// right_type: 2=订阅会员 -> 1, 其余(1,3,4,5) -> 0
+	for _, rt := range []string{"1", "3", "4", "5"} {
+		item := &flicknovel.OrderItem{RightType: rt}
+		if item.IsSubscription() {
+			t.Fatalf("expected right_type=%s to not be subscription", rt)
+		}
+		if resolver.Resolve(&OrderResolveContext{Dto: item}) != 0 {
+			t.Fatalf("expected Resolve=0 for right_type=%s", rt)
+		}
+	}
+
+	subItem := &flicknovel.OrderItem{RightType: "2", Period: "2", PeriodCount: "3", RefundStatus: "4"}
+	if !subItem.IsSubscription() {
+		t.Fatal("expected right_type=2 to be subscription")
+	}
+	if resolver.Resolve(&OrderResolveContext{Dto: subItem}) != 1 {
+		t.Fatal("expected Resolve=1 for right_type=2")
+	}
+	if days := subItem.GetSubPeriodDays(); days != 90 {
+		t.Fatalf("expected 90 days for period=2, period_count=3 (quarterly card), got %d", days)
+	}
+	if subItem.GetRefundStatusInt() != 4 {
+		t.Fatalf("expected refund_status=4, got %d", subItem.GetRefundStatusInt())
+	}
+
+	// 验证 RawOrder.IsRefunded 严格区分 flicknovel(4) 与 rocnovel(2)
+	fnOrder4 := &model.RawOrder{PlatformCode: model.PlatformFlicknovel, RefundStatus: 4}
+	fnOrder2 := &model.RawOrder{PlatformCode: model.PlatformFlicknovel, RefundStatus: 2}
+	rocOrder2 := &model.RawOrder{PlatformCode: model.PlatformRocnovel, RefundStatus: 2}
+	rocOrder4 := &model.RawOrder{PlatformCode: model.PlatformRocnovel, RefundStatus: 4}
+
+	if !fnOrder4.IsRefunded() {
+		t.Fatal("expected flicknovel refund_status=4 to be refunded")
+	}
+	if fnOrder2.IsRefunded() {
+		t.Fatal("expected flicknovel refund_status=2 to NOT be refunded (strict enum)")
+	}
+	if !rocOrder2.IsRefunded() {
+		t.Fatal("expected rocnovel refund_status=2 to be refunded")
+	}
+	if rocOrder4.IsRefunded() {
+		t.Fatal("expected rocnovel refund_status=4 to NOT be refunded")
 	}
 }

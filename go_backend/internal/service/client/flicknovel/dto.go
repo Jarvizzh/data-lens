@@ -1,5 +1,10 @@
 package flicknovel
 
+import (
+	"strconv"
+	"strings"
+)
+
 type BaseResponse[T any] struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -71,38 +76,73 @@ type OrderQueryData struct {
 }
 
 type OrderItem struct {
-	OrderID         string `json:"order_id"`
-	DeviceID        string `json:"device_id"`
-	AdID            string `json:"ad_id"`
-	AdsetID         string `json:"adset_id"`
-	CampaignID      string `json:"campaign_id"`
-	AdAccountID     string `json:"ad_account_id"`
-	PromotionID     string `json:"promotion_id"`
-	PromotionCode   string `json:"promotion_code"`
-	DistributorID   string `json:"distributor_id"`
-	ContentID       string `json:"content_id"`
-	Language        string `json:"language"`
-	MediaChannel    string `json:"media_channel"`
-	CreatedAt       string `json:"created_at"`   // 秒级时间戳字符串
-	CompletedAt     string `json:"completed_at"` // 秒级时间戳字符串
-	USPrice         string `json:"us_price"`     // 美元金额，如 "39.99"
-	RelationID      string `json:"relation_id"`
-	AppID           string `json:"app_id"`
-	AppName         string `json:"app_name"`
-	BenefitType     int    `json:"benefit_type"`
-	RechargeType    int    `json:"recharge_type"`
-	ProductID       string `json:"product_id"`
+	OrderID             string `json:"order_id"`
+	DeviceID            string `json:"device_id"`
+	AdID                string `json:"ad_id"`
+	AdsetID             string `json:"adset_id"`
+	CampaignID          string `json:"campaign_id"`
+	AdAccountID         string `json:"ad_account_id"`
+	PromotionID         string `json:"promotion_id"`
+	PromotionCode       string `json:"promotion_code"`
+	DistributorID       string `json:"distributor_id"`
+	DistributorEmail    string `json:"distributor_email"`
+	DistributorName     string `json:"distributor_name"`
+	ContentID           string `json:"content_id"`
+	ContentName         string `json:"content_name"`
+	Language            string `json:"language"`
+	MediaChannel        string `json:"media_channel"`
+	CreatedAt           string `json:"created_at"`            // 秒级时间戳字符串
+	CompletedAt         string `json:"completed_at"`          // 秒级时间戳字符串
+	USPrice             string `json:"us_price"`              // 实际支付美元金额，如 "0.99" / "19.99"
+	CurrentProductPrice string `json:"current_product_price"` // 商品现价(原价)，如 "19.99"
+	RelationID          string `json:"relation_id"`
+	AppID               string `json:"app_id"`
+	AppName             string `json:"app_name"`
+	ProductID           string `json:"product_id"`
+	RightType           string `json:"right_type"`    // 商品权益类型: 1-买赠充值, 2-订阅会员, 3-整本购买, 4-一次性会员, 5-金币包
+	Period              string `json:"period"`        // 周期单位: 1-周, 2-月, 3-年, 4-日
+	PeriodCount         string `json:"period_count"`  // 周期数量: 如 "1", "3"
+	RechargeType        string `json:"recharge_type"` // 订阅类型: 1-首订, 2-续订, 100-单充
+	RefundStatus        string `json:"refund_status"` // 退款状态: 0-未退款, 4-已退款
+	RefundTime          string `json:"refund_time"`   // 退款时间(秒级时间戳字符串)
+}
 
-	// 兼容旧字段
-	UserID          string `json:"user_id,omitempty"`
-	OrderAmountCent int    `json:"order_amount_cent,omitempty"`
-	OrderAmountUSD  string `json:"order_amount_usd,omitempty"`
-	IsSubs          int    `json:"is_subs,omitempty"`
-	RenewType       int    `json:"renew_type,omitempty"`
-	PayState        int    `json:"pay_state,omitempty"`
-	PayTime         string `json:"pay_time,omitempty"`
-	RegisterTime    string `json:"register_time,omitempty"`
-	RefundStatus    int    `json:"refund_status,omitempty"`
+// GetRightTypeInt 解析商品权益类型枚举 (1-买赠充值, 2-订阅会员, 3-整本购买, 4-一次性会员, 5-金币包)
+func (o *OrderItem) GetRightTypeInt() int {
+	v, _ := strconv.Atoi(strings.TrimSpace(o.RightType))
+	return v
+}
+
+// IsSubscription 判定是否为订阅会员订单 (仅 right_type == 2 为订阅会员)
+func (o *OrderItem) IsSubscription() bool {
+	return o.GetRightTypeInt() == 2
+}
+
+// GetSubPeriodDays 结合 period(1-周, 2-月, 3-年, 4-日) 与 period_count 计算订阅周期天数
+func (o *OrderItem) GetSubPeriodDays() int {
+	pUnit, _ := strconv.Atoi(strings.TrimSpace(o.Period))
+	pCount, _ := strconv.Atoi(strings.TrimSpace(o.PeriodCount))
+	if pCount <= 0 {
+		pCount = 1
+	}
+	switch pUnit {
+	case 1: // 周
+		return 7 * pCount
+	case 2: // 月 (如 period=2, period_count=3 为季卡 90 天)
+		return 30 * pCount
+	case 3: // 年
+		return 365 * pCount
+	case 4: // 日
+		return 1 * pCount
+	default:
+		return 1
+	}
+}
+
+// GetRefundStatusInt 严格解析司南接口返回的 refund_status (0-未退款, 4-已退款)
+func (o *OrderItem) GetRefundStatusInt() int {
+	v, _ := strconv.Atoi(strings.TrimSpace(o.RefundStatus))
+	return v
 }
 
 // 染色归因

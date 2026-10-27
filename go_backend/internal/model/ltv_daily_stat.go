@@ -20,6 +20,10 @@ type LtvDailyStat struct {
 	TotalRoi              decimal.Decimal  `gorm:"column:total_roi;type:decimal(10,4);not null;default:0.0000" json:"totalRoi"`
 	SubUserCount          int              `gorm:"column:sub_user_count;not null;default:0" json:"subUserCount"`
 	SubUserCost           decimal.Decimal  `gorm:"column:sub_user_cost;type:decimal(10,2);not null;default:0.00" json:"subUserCost"`
+	Day2SubUserCount      *int             `gorm:"column:day2_sub_user_count" json:"day2SubUserCount"`
+	Day2SubUserRetention  *decimal.Decimal `gorm:"column:day2_sub_user_retention;type:decimal(10,4)" json:"day2SubUserRetention"`
+	Day3SubUserCount      *int             `gorm:"column:day3_sub_user_count" json:"day3SubUserCount"`
+	Day3SubUserRetention  *decimal.Decimal `gorm:"column:day3_sub_user_retention;type:decimal(10,4)" json:"day3SubUserRetention"`
 	Day7SubUserCount      *int             `gorm:"column:day7_sub_user_count" json:"day7SubUserCount"`
 	Day7SubUserRetention  *decimal.Decimal `gorm:"column:day7_sub_user_retention;type:decimal(10,4)" json:"day7SubUserRetention"`
 	Day15SubUserCount     *int             `gorm:"column:day15_sub_user_count" json:"day15SubUserCount"`

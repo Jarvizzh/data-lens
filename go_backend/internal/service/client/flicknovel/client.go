@@ -175,6 +175,9 @@ func (c *Client) QueryRechargeTemplates(ctx context.Context, req RechargeTemplat
 
 // QueryOrders 查询订单
 func (c *Client) QueryOrders(ctx context.Context, req OrderQueryRequest) (*OrderQueryData, error) {
+	if req.PageSize < 100 {
+		req.PageSize = 100
+	}
 	var resp BaseResponse[OrderQueryData]
 	err := c.post(ctx, "/get_order_list/v1", req, &resp)
 	if err != nil {

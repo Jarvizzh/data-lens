@@ -19,173 +19,15 @@ import (
 	"go.uber.org/zap"
 )
 
-const notFoundTpl = "__NOT_FOUND__"
-
-// initFlicknovelCache 初始化从 DB 预热番茄司南缓存
+// initFlicknovelCache 初始化检查番茄司南推广链接与充值模板
 func (m *SyncManager) initFlicknovelCache(ctx context.Context) {
-	m.logger.Info("Initializing Flicknovel promotion & template price cache from DB...")
-	m.loadFlicknovelCacheFromDB(ctx)
-
-	m.fnCacheMu.RLock()
-	pSize := len(m.promotionTemplateMap)
-	tSize := len(m.templateDetailCache)
-	m.fnCacheMu.RUnlock()
-
-	if pSize == 0 || tSize == 0 {
-		m.logger.Info("In-memory cache empty on startup. Triggering initial sync from OpenAPI...")
-		_ = m.SyncFlicknovelPromotionsAndTemplates(ctx)
-	} else {
-		m.logger.Info("In-memory cache loaded successfully from DB",
-			zap.Int("promotions", pSize),
-			zap.Int("templates", tSize),
-		)
-	}
-}
-
-// loadFlicknovelCacheFromDB 从本地数据库加载数据构建内存字典
-func (m *SyncManager) loadFlicknovelCacheFromDB(ctx context.Context) {
 	if m.flicknovelRepo == nil {
 		return
 	}
-
-	templates, err := m.flicknovelRepo.FindAllTemplates(ctx)
-	if err != nil {
-		m.logger.Warn("Failed to load templates from DB", zap.Error(err))
-		return
-	}
-
-	newTemplateDetailCache := make(map[string]*TemplatePriceDetail)
-	newTemplatePriceTypeCache := make(map[string]map[int]int)
-
-	for _, tpl := range templates {
-		tplID := strings.TrimSpace(tpl.TemplateID)
-		if tplID == "" {
-			continue
-		}
-		if strings.TrimSpace(tpl.RawPayload) != "" {
-			detail := ParseTemplatePriceDetail(tpl.RawPayload)
-			newTemplateDetailCache[tplID] = detail
-			newTemplatePriceTypeCache[tplID] = detail.PriceMap
-		} else if strings.TrimSpace(tpl.PriceConfigJSON) != "" {
-			var rawMap map[string]int
-			if err := json.Unmarshal([]byte(tpl.PriceConfigJSON), &rawMap); err == nil {
-				priceMap := make(map[int]int)
-				for k, v := range rawMap {
-					if p, e := strconv.Atoi(k); e == nil {
-						priceMap[p] = v
-					}
-				}
-				newTemplatePriceTypeCache[tplID] = priceMap
-				fallbackDetail := &TemplatePriceDetail{
-					PriceMap:        priceMap,
-					AmbiguousPrices: make(map[int]bool),
-					FirstPriceMap:   priceMap,
-					NoFirstPriceMap: priceMap,
-				}
-				newTemplateDetailCache[tplID] = fallbackDetail
-			}
-		}
-	}
-
-	promotions, err := m.flicknovelRepo.FindAllPromotions(ctx)
-	if err != nil {
-		m.logger.Warn("Failed to load promotions from DB", zap.Error(err))
-	}
-
-	newPromotionTemplateMap := make(map[string]string)
-	for _, p := range promotions {
-		pID := strings.TrimSpace(p.PromotionID)
-		tID := strings.TrimSpace(p.RechargeTplID)
-		if pID != "" && tID != "" {
-			newPromotionTemplateMap[pID] = tID
-		}
-	}
-
-	m.fnCacheMu.Lock()
-	m.templateDetailCache = newTemplateDetailCache
-	m.templatePriceTypeCache = newTemplatePriceTypeCache
-	m.promotionTemplateMap = newPromotionTemplateMap
-	m.fnCacheMu.Unlock()
-}
-
-// populateTemplateContext 填充模板上下文（若未命中则自愈拉取 API）
-func (m *SyncManager) populateTemplateContext(ctx context.Context, promotionID string, resolveCtx *OrderResolveContext) {
-	pID := strings.TrimSpace(promotionID)
-	if pID == "" {
-		return
-	}
-
-	m.fnCacheMu.RLock()
-	tplID, exists := m.promotionTemplateMap[pID]
-	m.fnCacheMu.RUnlock()
-
-	if tplID == notFoundTpl {
-		return
-	}
-
-	if !exists || tplID == "" {
-		// 查 DB
-		if m.flicknovelRepo != nil {
-			dbPrmt, _ := m.flicknovelRepo.FindPromotionByID(ctx, pID)
-			if dbPrmt != nil && strings.TrimSpace(dbPrmt.RechargeTplID) != "" {
-				tplID = strings.TrimSpace(dbPrmt.RechargeTplID)
-				m.fnCacheMu.Lock()
-				m.promotionTemplateMap[pID] = tplID
-				m.fnCacheMu.Unlock()
-			} else {
-				// DB 也无，触发按需自愈同步
-				m.logger.Info("PromotionId not found in memory or DB, triggering on-demand sync", zap.String("promotion_id", pID))
-				_ = m.syncPromotionsAndTemplatesInternal(ctx, false)
-
-				m.fnCacheMu.RLock()
-				tplID = m.promotionTemplateMap[pID]
-				m.fnCacheMu.RUnlock()
-
-				if tplID == "" {
-					m.fnCacheMu.Lock()
-					m.promotionTemplateMap[pID] = notFoundTpl
-					m.fnCacheMu.Unlock()
-					return
-				}
-			}
-		}
-	}
-
-	if tplID != "" && tplID != notFoundTpl {
-		m.fnCacheMu.RLock()
-		detail, hasDetail := m.templateDetailCache[tplID]
-		m.fnCacheMu.RUnlock()
-
-		if !hasDetail || detail == nil {
-			if m.flicknovelRepo != nil {
-				dbTpl, _ := m.flicknovelRepo.FindTemplateByID(ctx, tplID)
-				if dbTpl != nil && strings.TrimSpace(dbTpl.RawPayload) != "" {
-					detail = ParseTemplatePriceDetail(dbTpl.RawPayload)
-					m.fnCacheMu.Lock()
-					m.templateDetailCache[tplID] = detail
-					m.templatePriceTypeCache[tplID] = detail.PriceMap
-					m.fnCacheMu.Unlock()
-				}
-			}
-		}
-
-		if detail != nil {
-			resolveCtx.TemplatePriceMap = detail.PriceMap
-			resolveCtx.AmbiguousPrices = detail.AmbiguousPrices
-			resolveCtx.TemplateHasIntroOffer = detail.HasIntroOffer
-			resolveCtx.FirstPriceMap = detail.FirstPriceMap
-			resolveCtx.NoFirstPriceMap = detail.NoFirstPriceMap
-			resolveCtx.FirstAmbiguousPrices = detail.FirstAmbiguousPrices
-			resolveCtx.NoFirstAmbiguousPrices = detail.NoFirstAmbiguousPrices
-			return
-		}
-
-		m.fnCacheMu.RLock()
-		priceMap := m.templatePriceTypeCache[tplID]
-		m.fnCacheMu.RUnlock()
-		if priceMap != nil {
-			resolveCtx.TemplatePriceMap = priceMap
-		}
+	pCount, _ := m.flicknovelRepo.CountPromotions(ctx)
+	if pCount == 0 {
+		m.logger.Info("Flicknovel promotions empty on startup. Triggering initial sync from OpenAPI...")
+		_ = m.SyncFlicknovelPromotionsAndTemplates(ctx)
 	}
 }
 
@@ -342,13 +184,16 @@ func (m *SyncManager) batchCleanAndSaveFlicknovelOrders(
 		return 0, nil
 	}
 
-	// 1. 过滤非法订单并提取 memberId
+	// 1. 过滤非法订单并提取 memberId 与本批次 orderId 集合
 	validOrders := make([]*flicknovel.OrderDto, 0, len(orders))
 	memberIDSet := make(map[string]bool)
+	batchOrderIDSet := make(map[string]bool, len(orders))
 	for i := range orders {
 		o := &orders[i]
-		if strings.TrimSpace(o.OrderID) != "" {
+		ordID := strings.TrimSpace(o.OrderID)
+		if ordID != "" {
 			validOrders = append(validOrders, o)
+			batchOrderIDSet[ordID] = true
 			mID := extractFlicknovelMemberID(o)
 			if mID != "" && mID != "UNKNOWN" {
 				memberIDSet[mID] = true
@@ -365,14 +210,36 @@ func (m *SyncManager) batchCleanAndSaveFlicknovelOrders(
 		memberIDs = append(memberIDs, id)
 	}
 
-	// 2. 预查库中已有的历史订单，聚合各用户的最早支付时间与注册时间画像
+	// 2. 将本批次订单按用户聚类，并按支付时间升序排序，记录各用户在本批次的最早支付时间
+	ordersByMember := make(map[string][]*flicknovel.OrderDto)
+	earliestBatchPayTimeByMember := make(map[string]time.Time, len(memberIDs))
+	for _, o := range validOrders {
+		mID := extractFlicknovelMemberID(o)
+		ordersByMember[mID] = append(ordersByMember[mID], o)
+	}
+	for mID, memberOrders := range ordersByMember {
+		sort.Slice(memberOrders, func(i, j int) bool {
+			return parseEpochSecondSafe(memberOrders[i].CompletedAt, memberOrders[i].CreatedAt) <
+				parseEpochSecondSafe(memberOrders[j].CompletedAt, memberOrders[j].CreatedAt)
+		})
+		firstTs := parseEpochSecondSafe(memberOrders[0].CompletedAt, memberOrders[0].CreatedAt)
+		earliestBatchPayTimeByMember[mID] = time.Unix(firstTs, 0).In(timeutil.BeijingZone)
+	}
+
+	// 3. 预查库中已有的前置历史订单（排除本批次正在同步的订单，且跳过晚于本批次首单的后续分段订单，杜绝未来分段旧脏数据反向污染）
 	userHistoryMap := make(map[string]*UserProfileSnapshot)
 	if len(memberIDs) > 0 {
 		existingOrders, err := m.orderRepo.FindHistoryOrdersByMemberIDs(ctx, model.PlatformFlicknovel, memberIDs)
 		if err == nil {
 			for _, ho := range existingOrders {
+				if batchOrderIDSet[strings.TrimSpace(ho.OrderID)] {
+					continue
+				}
 				mID := strings.TrimSpace(ho.MemberID)
 				if mID == "" {
+					continue
+				}
+				if earliestBatch, ok := earliestBatchPayTimeByMember[mID]; ok && ho.PayTimeBJ.After(earliestBatch) {
 					continue
 				}
 				isSubs := ho.IsSubs == 1
@@ -412,22 +279,9 @@ func (m *SyncManager) batchCleanAndSaveFlicknovelOrders(
 		}
 	}
 
-	// 3. 将本批次订单按用户聚类，并按支付时间升序排序
-	ordersByMember := make(map[string][]*flicknovel.OrderDto)
-	for _, o := range validOrders {
-		mID := extractFlicknovelMemberID(o)
-		ordersByMember[mID] = append(ordersByMember[mID], o)
-	}
-
 	toSave := make([]*model.RawOrder, 0, len(validOrders))
 
 	for memberID, memberOrders := range ordersByMember {
-		// 按支付时间升序排序
-		sort.Slice(memberOrders, func(i, j int) bool {
-			return parseEpochSecondSafe(memberOrders[i].CompletedAt, memberOrders[i].CreatedAt) <
-				parseEpochSecondSafe(memberOrders[j].CompletedAt, memberOrders[j].CreatedAt)
-		})
-
 		profile, exists := userHistoryMap[memberID]
 		if !exists {
 			profile = &UserProfileSnapshot{}
@@ -470,8 +324,6 @@ func (m *SyncManager) batchCleanAndSaveFlicknovelOrders(
 			if err == nil {
 				savedCount += len(batch)
 				batchErr = nil
-				// 维护首次订阅用户的周期配置表 (批量单条 SQL 查询与写入，杜绝 N+1 数据库风暴)
-				m.BatchSaveOrUpdateSubscriptionPeriods(writeCtx, model.PlatformFlicknovel, batch)
 				break
 			}
 			batchErr = err
@@ -486,6 +338,9 @@ func (m *SyncManager) batchCleanAndSaveFlicknovelOrders(
 			return savedCount, batchErr
 		}
 	}
+
+	// 统一维护本分段所有订阅用户的周期与价格配置表
+	m.BatchSaveOrUpdateSubscriptionPeriods(writeCtx, model.PlatformFlicknovel, toSave)
 
 	return savedCount, nil
 }
@@ -586,30 +441,15 @@ func (m *SyncManager) cleanSingleFlicknovelOrder(
 
 	// 5. 金额清洗 (us_price 美元字符串 -> Decimal 与 美分整数)
 	amtUsd, _ := decimal.NewFromString(strings.TrimSpace(dto.USPrice))
-	if amtUsd.IsZero() {
-		amtUsd, _ = decimal.NewFromString(strings.TrimSpace(dto.OrderAmountUSD))
-	}
-	orderAmountCent := dto.OrderAmountCent
-	if orderAmountCent == 0 && amtUsd.GreaterThan(decimal.Zero) {
+	orderAmountCent := 0
+	if amtUsd.GreaterThan(decimal.Zero) {
 		orderAmountCent = int(amtUsd.Mul(decimal.NewFromInt(100)).IntPart())
 	}
 
-	// 6. 充值类型清洗识别 (0=单充/代币充值, 1=时长订阅)
-	resolveCtx := &OrderResolveContext{
-		Dto:             dto,
-		PromotionID:     landingPageID,
-		OrderAmountCent: orderAmountCent,
-		RenewType:       renewType,
-		PayTimeBJ:       payTimeBj,
-		PayTimeUTC:      payTimeUtc,
-		HasSubscribed:   profile.HasSubscribed,
-	}
-	if profile.LatestSubsPayTime != nil {
-		resolveCtx.LatestSubsPayTime = *profile.LatestSubsPayTime
-	}
-
-	m.populateTemplateContext(ctx, landingPageID, resolveCtx)
-	isSubs := m.fnResolver.Resolve(resolveCtx)
+	// 6. 充值类型清洗识别 (严格依据 right_type: 2=订阅会员 -> 1, 其余 -> 0)
+	isSubs := m.fnResolver.Resolve(&OrderResolveContext{
+		Dto: dto,
+	})
 	if isSubs == 1 {
 		profile.HasSubscribed = true
 		profile.LatestSubsPayTime = &payTimeBj
@@ -637,7 +477,7 @@ func (m *SyncManager) cleanSingleFlicknovelOrder(
 		IsSubs:          isSubs,
 		RenewType:       renewType,
 		PayState:        1,
-		RefundStatus:    dto.RefundStatus,
+		RefundStatus:    dto.GetRefundStatusInt(),
 		RawPayload:      string(rawPayload),
 		CreatedAt:       time.Now(),
 	}
@@ -973,9 +813,6 @@ func (m *SyncManager) SyncFlicknovelPromotionsAndTemplates(ctx context.Context) 
 			totalTemplates += len(templates)
 		}
 	}
-
-	// 重新从本地数据库刷新缓存字典
-	m.loadFlicknovelCacheFromDB(ctx)
 
 	m.fnCacheMu.Lock()
 	m.lastFnSyncTime = time.Now()

@@ -134,9 +134,9 @@ func (r *OrderRepository) FindMonthlySettlementSummaries(ctx context.Context, pl
 		%s AS month_str,
 		COALESCE(landing_page_id, '') AS landing_page_id,
 		SUM(CASE WHEN order_amount_cent > 0 THEN order_amount_cent ELSE ROUND(order_amount_usd * 100) END) AS total_amount_cent,
-		SUM(CASE WHEN refund_status = 2 THEN (CASE WHEN order_amount_cent > 0 THEN order_amount_cent ELSE ROUND(order_amount_usd * 100) END) ELSE 0 END) AS refund_amount_cent,
+		SUM(CASE WHEN (platform_code = 'flicknovel' AND refund_status = 4) OR (platform_code != 'flicknovel' AND refund_status = 2) THEN (CASE WHEN order_amount_cent > 0 THEN order_amount_cent ELSE ROUND(order_amount_usd * 100) END) ELSE 0 END) AS refund_amount_cent,
 		COUNT(1) AS total_orders,
-		SUM(CASE WHEN refund_status = 2 THEN 1 ELSE 0 END) AS refund_orders
+		SUM(CASE WHEN (platform_code = 'flicknovel' AND refund_status = 4) OR (platform_code != 'flicknovel' AND refund_status = 2) THEN 1 ELSE 0 END) AS refund_orders
 	`, dateExpr)
 
 	q := r.db.WithContext(ctx).Table("raw_order").
@@ -251,7 +251,7 @@ func (r *OrderRepository) SaveUserSubscriptionPeriod(ctx context.Context, period
 	}
 	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "member_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"landing_page_id", "subscribe_config_id", "sub_period_days", "first_price_cent", "renew_price_cent", "updated_at"}),
+		DoUpdates: clause.AssignmentColumns([]string{"platform_code", "landing_page_id", "subscribe_config_id", "sub_period_days", "first_price_cent", "renew_price_cent", "updated_at"}),
 	}).Create(period).Error
 }
 
@@ -296,13 +296,28 @@ func (r *OrderRepository) BatchSaveUserSubscriptionPeriods(ctx context.Context, 
 		chunk := periods[i:end]
 		err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "member_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{"landing_page_id", "subscribe_config_id", "sub_period_days", "first_price_cent", "renew_price_cent", "updated_at"}),
+			DoUpdates: clause.AssignmentColumns([]string{"platform_code", "landing_page_id", "subscribe_config_id", "sub_period_days", "first_price_cent", "renew_price_cent", "updated_at"}),
 		}).Create(chunk).Error
 		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// CleanupNonSubscriberPeriods 精确清理已被修正为非订阅用户（在 raw_order 中无任何有效订阅单）残留的订阅周期记录
+func (r *OrderRepository) CleanupNonSubscriberPeriods(ctx context.Context, platformCode string, memberIDs []string) error {
+	if len(memberIDs) == 0 {
+		return nil
+	}
+	pCode := strings.ToLower(strings.TrimSpace(platformCode))
+	if pCode == "" || model.IsAllPlatforms(pCode) {
+		return nil
+	}
+	return r.db.WithContext(ctx).
+		Where("platform_code = ? AND member_id IN ?", pCode, memberIDs).
+		Where("NOT EXISTS (SELECT 1 FROM raw_order ro WHERE ro.platform_code = user_subscription_period.platform_code AND ro.member_id = user_subscription_period.member_id AND ro.pay_state = 1 AND ro.is_subs = 1)").
+		Delete(&model.UserSubscriptionPeriod{}).Error
 }
 
 // FindMatchingFirstPriceVersions 按落地页、首订价格和生效时间匹配订阅版本
@@ -357,6 +372,20 @@ func (r *OrderRepository) SaveSubscriptionVersion(ctx context.Context, v *model.
 	}
 	v.UpdatedAt = time.Now()
 	return r.db.WithContext(ctx).Save(v).Error
+}
+
+// BackfillFlicknovelProductRenewPrice 当后续分段或后续小时出现某推广链接+商品的续订订单并确认其续订原价后，回填此前仅暂存首充优惠价的用户续订价格
+func (r *OrderRepository) BackfillFlicknovelProductRenewPrice(ctx context.Context, landingPageID, productID string, renewPriceCent int) error {
+	if productID == "" || renewPriceCent <= 0 {
+		return nil
+	}
+	q := r.db.WithContext(ctx).Model(&model.UserSubscriptionPeriod{}).
+		Where("platform_code = ? AND subscribe_config_id = ? AND (renew_price_cent IS NULL OR renew_price_cent <= first_price_cent) AND first_price_cent < ?",
+			model.PlatformFlicknovel, productID, renewPriceCent)
+	if landingPageID != "" {
+		q = q.Where("landing_page_id = ?", landingPageID)
+	}
+	return q.Update("renew_price_cent", renewPriceCent).Error
 }
 
 func applyPlatformFilter(q *gorm.DB, platformCode string) *gorm.DB {

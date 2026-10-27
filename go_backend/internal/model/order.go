@@ -35,6 +35,17 @@ type RawOrder struct {
 }
 
 func (RawOrder) TableName() string { return "raw_order" }
+
+// IsRefunded 严格按各平台接口参数定义判定是否已退款 (番茄司南 refund_status=4，中文在线 refund_status=2)
+func (o *RawOrder) IsRefunded() bool {
+	if o == nil {
+		return false
+	}
+	if IsFlicknovel(o.PlatformCode) {
+		return o.RefundStatus == 4
+	}
+	return o.RefundStatus == 2
+}
  
 func (o *RawOrder) AfterFind(tx *gorm.DB) error {
 	if len(o.RegisterDateET) >= 10 {

@@ -98,6 +98,24 @@ func TestCalculateSingleCohort_PrefixSumAndRetention(t *testing.T) {
 	}
 
 	// 3. Check Retention:
+	// Day 2 (次日): userA (Day 8 >= Day 2) and userB (Day 2 >= Day 2) -> 2 retained / 2 = 1.0000
+	if stat.Day2SubUserCount == nil || *stat.Day2SubUserCount != 2 {
+		t.Fatalf("Expected Day2SubUserCount 2, got %v", stat.Day2SubUserCount)
+	}
+	expectedR2 := decimal.NewFromFloat(1.0)
+	if stat.Day2SubUserRetention == nil || !stat.Day2SubUserRetention.Equal(expectedR2) {
+		t.Fatalf("Expected Day2SubUserRetention 1.0, got %v", stat.Day2SubUserRetention)
+	}
+
+	// Day 3 (三日): userA paid on Day 8 >= Day 3 -> 1 retained / 2 = 0.5000
+	if stat.Day3SubUserCount == nil || *stat.Day3SubUserCount != 1 {
+		t.Fatalf("Expected Day3SubUserCount 1, got %v", stat.Day3SubUserCount)
+	}
+	expectedR3 := decimal.NewFromFloat(0.5)
+	if stat.Day3SubUserRetention == nil || !stat.Day3SubUserRetention.Equal(expectedR3) {
+		t.Fatalf("Expected Day3SubUserRetention 0.5, got %v", stat.Day3SubUserRetention)
+	}
+
 	// Day 7: userA paid on Day 8 >= Day 8 -> 1 retained / 2 = 0.5000
 	if stat.Day7SubUserCount == nil || *stat.Day7SubUserCount != 1 {
 		t.Fatalf("Expected Day7SubUserCount 1, got %v", stat.Day7SubUserCount)

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go_backend/internal/config"
+	"go_backend/internal/model"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -56,6 +57,9 @@ func InitDB(cfg *config.MySQLConfig) (*gorm.DB, error) {
 	sqlDB.SetMaxIdleConns(maxIdle)
 	sqlDB.SetMaxOpenConns(maxOpen)
 	sqlDB.SetConnMaxLifetime(time.Duration(maxLifetime) * time.Minute)
+
+	// 自动安全同步缺失列（如新增的 day2/day3 留存统计字段，仅增加列不影响现有数据）
+	_ = db.AutoMigrate(&model.LtvDailyStat{})
 
 	DB = db
 	return db, nil

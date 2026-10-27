@@ -85,6 +85,10 @@ export function exportLtvTable(data, showPrediction = true, username = '', dateR
     '累计ROI',
     '订阅用户(人)',
     '订阅成本(USD)',
+    '次日留存人数',
+    '次日留存率',
+    '三日留存人数',
+    '三日留存率',
     '7日留存人数',
     '7日留存率',
     '15日留存人数',
@@ -109,6 +113,10 @@ export function exportLtvTable(data, showPrediction = true, username = '', dateR
     const roi = item.totalRoi != null ? `${(parseFloat(item.totalRoi) * 100).toFixed(2)}%` : '0.00%';
     const subUsers = item.subUserCount != null ? item.subUserCount : 0;
     const subCost = item.subUserCost != null ? parseFloat(item.subUserCost).toFixed(2) : '0.00';
+    const day2Count = item.day2SubUserCount != null ? item.day2SubUserCount : '-';
+    const day2Rate = item.day2SubUserRetention != null ? `${(parseFloat(item.day2SubUserRetention) * 100).toFixed(2)}%` : '-';
+    const day3Count = item.day3SubUserCount != null ? item.day3SubUserCount : '-';
+    const day3Rate = item.day3SubUserRetention != null ? `${(parseFloat(item.day3SubUserRetention) * 100).toFixed(2)}%` : '-';
     const day7Count = item.day7SubUserCount != null ? item.day7SubUserCount : '-';
     const day7Rate = item.day7SubUserRetention != null ? `${(parseFloat(item.day7SubUserRetention) * 100).toFixed(2)}%` : '-';
     const day15Count = item.day15SubUserCount != null ? item.day15SubUserCount : '-';
@@ -131,6 +139,10 @@ export function exportLtvTable(data, showPrediction = true, username = '', dateR
       roi,
       subUsers,
       subCost,
+      day2Count,
+      day2Rate,
+      day3Count,
+      day3Rate,
       day7Count,
       day7Rate,
       day15Count,

@@ -69,7 +69,7 @@ func (c *LtvCalculator) CalculateSingleCohort(
 	lpCountMap := make(map[string]int)
 	for _, o := range cohortOrders {
 		totalRecharge = totalRecharge.Add(o.OrderAmountUSD)
-		if o.RefundStatus == 2 {
+		if o.IsRefunded() {
 			totalRefund = totalRefund.Add(o.OrderAmountUSD)
 		}
 		if o.IsSubs == 1 && o.MemberID != "" {
@@ -147,15 +147,21 @@ func (c *LtvCalculator) CalculateSingleCohort(
 	}
 	stat.SubPeriodDays = detectedPeriod
 
-	// 2. 7日与15日留存 & Day 1 ~ Day 60 充值单趟扫描 (O(N + 60) 前缀和优化，消除 O(60*N) 重复热循环)
+	// 2. 次日、三日、7日与15日留存 & Day 1 ~ Day 60 充值单趟扫描 (O(N + 60) 前缀和优化，消除 O(60*N) 重复热循环)
+	day2DateStr := launchDate.AddDate(0, 0, 1).Format(timeutil.DateLayout)
+	day3DateStr := launchDate.AddDate(0, 0, 2).Format(timeutil.DateLayout)
 	day8DateStr := launchDate.AddDate(0, 0, 7).Format(timeutil.DateLayout)
 	day16DateStr := launchDate.AddDate(0, 0, 15).Format(timeutil.DateLayout)
 	maxTodayStr := maxToday.Format(timeutil.DateLayout)
 	launchDateStr = launchDate.Format(timeutil.DateLayout)
 
+	checkDay2 := day2DateStr <= maxTodayStr
+	checkDay3 := day3DateStr <= maxTodayStr
 	checkDay7 := day8DateStr <= maxTodayStr
 	checkDay15 := day16DateStr <= maxTodayStr
 
+	retained2 := make(map[string]struct{})
+	retained3 := make(map[string]struct{})
 	retained7 := make(map[string]struct{})
 	retained15 := make(map[string]struct{})
 
@@ -177,6 +183,12 @@ func (c *LtvCalculator) CalculateSingleCohort(
 
 		// 留存统计 (仅统计首充用户中的订阅成员)
 		if _, isSubMember := subMembersMap[o.MemberID]; isSubMember {
+			if checkDay2 && payDateStr >= day2DateStr {
+				retained2[o.MemberID] = struct{}{}
+			}
+			if checkDay3 && payDateStr >= day3DateStr {
+				retained3[o.MemberID] = struct{}{}
+			}
 			if checkDay7 && payDateStr >= day8DateStr {
 				retained7[o.MemberID] = struct{}{}
 			}
@@ -196,6 +208,30 @@ func (c *LtvCalculator) CalculateSingleCohort(
 	}
 
 	// 留存统计赋值
+	if checkDay2 {
+		c2 := len(retained2)
+		stat.Day2SubUserCount = &c2
+		if subUserCount > 0 {
+			r2 := decimal.NewFromInt(int64(c2)).DivRound(decimal.NewFromInt(int64(subUserCount)), 4)
+			stat.Day2SubUserRetention = &r2
+		}
+	} else {
+		stat.Day2SubUserCount = nil
+		stat.Day2SubUserRetention = nil
+	}
+
+	if checkDay3 {
+		c3 := len(retained3)
+		stat.Day3SubUserCount = &c3
+		if subUserCount > 0 {
+			r3 := decimal.NewFromInt(int64(c3)).DivRound(decimal.NewFromInt(int64(subUserCount)), 4)
+			stat.Day3SubUserRetention = &r3
+		}
+	} else {
+		stat.Day3SubUserCount = nil
+		stat.Day3SubUserRetention = nil
+	}
+
 	if checkDay7 {
 		c7 := len(retained7)
 		stat.Day7SubUserCount = &c7

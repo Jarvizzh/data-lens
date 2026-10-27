@@ -37,12 +37,8 @@ type SyncManager struct {
 	syncersMu sync.RWMutex
 	syncers   map[string]PlatformSyncer
 
-	// 番茄司南内存字典缓存 (推广链接 -> 模板ID, 模板ID -> 详情字典)
-	fnCacheMu              sync.RWMutex
-	promotionTemplateMap   map[string]string
-	templateDetailCache    map[string]*TemplatePriceDetail
-	templatePriceTypeCache map[string]map[int]int
-	lastFnSyncTime         time.Time
+	fnCacheMu      sync.RWMutex
+	lastFnSyncTime time.Time
 
 	// 订阅配置版本内存缓存 (防止批量订单同步时频繁触发 N+1 级联数据库查询风暴)
 	subVersionsMu       sync.RWMutex
@@ -70,17 +66,14 @@ func NewSyncManager(
 		logger = zap.NewNop()
 	}
 	sm := &SyncManager{
-		orderRepo:              orderRepo,
-		flicknovelRepo:         flicknovelRepo,
-		platformRepo:           platformRepo,
-		rocnovelClient:         rocnovelClient,
-		fnClient:               fnClient,
-		fnResolver:             NewFlicknovelOrderTypeResolver(logger),
-		logger:                 logger,
-		syncers:                make(map[string]PlatformSyncer),
-		promotionTemplateMap:   make(map[string]string),
-		templateDetailCache:    make(map[string]*TemplatePriceDetail),
-		templatePriceTypeCache: make(map[string]map[int]int),
+		orderRepo:      orderRepo,
+		flicknovelRepo: flicknovelRepo,
+		platformRepo:   platformRepo,
+		rocnovelClient: rocnovelClient,
+		fnClient:       fnClient,
+		fnResolver:     NewFlicknovelOrderTypeResolver(logger),
+		logger:         logger,
+		syncers:        make(map[string]PlatformSyncer),
 	}
 
 	// 注册内置平台驱动
